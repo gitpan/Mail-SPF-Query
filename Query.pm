@@ -5,12 +5,12 @@ package Mail::SPF::Query;
 #
 # 		       Meng Weng Wong
 #		  <mengwong+spf@pobox.com>
-# $Id: Query.pm,v 1.16 2003/11/29 02:14:28 devel Exp $
+# $Id: Query.pm,v 1.19 2003/11/29 21:38:39 devel Exp $
 # test an IP / sender address pair for pass/fail/nodata/error
 #
 # http://spf.pobox.com/
 #
-# this version is compatible with draft-02.8.txt
+# this version is compatible with draft-02.9.txt
 #
 # license: opensource.
 #
@@ -31,13 +31,15 @@ use Net::DNS qw(); # by default it exports mx, which we define.
 # 		       initialization
 # ----------------------------------------------------------
 
-my $GUESS_MECHS = "a/24 mx/24 ptr exists:%{d}.wl.trusted-forwarder.org";
+my $GUESS_MECHS = "a/24 mx/24 ptr exists:%{d}.wl.trusted-forwarder.org exists:%{ir}.wl.trusted-forwarder.org";
 
 my @KNOWN_MECHANISMS = qw( a mx ptr include ip4 ip6 exists all );
 
+my $MAX_RECURSION_DEPTH = 10;
+
 my $Domains_Queried = {};
 
-$VERSION = "1.8.1";
+$VERSION = "1.9";
 
 $CACHE_TIMEOUT = 120;
 
@@ -87,6 +89,7 @@ of an SMTP client IP.
   optional parameters:
      guess_mechs => "a/24 mx/24 ptr exists:%{d}.wl.trusted-forwarder.org",
      debug => 1, debuglog => sub { print STDERR "@_\n" },
+     max_recursion_depth => 10,
 
   if ($@) { warn "bad input to Mail::SPF::Query: $@" }
 
@@ -131,7 +134,7 @@ sub new {
   $query->{loop_report} = [$query->{domain}];
 
   ($query->{localpart}) = $query->{sender} =~ /(.+)\@/;
-  $query->{localpart} ||= "no-spf-sender";
+  $query->{localpart} = "postmaster" if not length $query->{localpart};
 
   $query->debuglog("localpart is $query->{localpart}");
 
@@ -202,7 +205,8 @@ sub header_comment {
      : $result eq "fail"     ? "domain of $query->{sender} does not designate $ip as permitted sender"
      : $result eq "softfail" ? "transitioning domain of $query->{sender} does not designate $ip as permitted sender"
      : $result eq "error"    ? "error in processing during lookup of $query->{sender}"
-     : $result eq "UNKNOWN"  ? "domain of $query->{sender} has SPF misconfiguration"
+     : $result eq "UNKNOWN"  ? "an error occurred during SPF processing of domain of $query->{sender}"
+     : $result =~ /^UNKNOWN/ ? "encountered unrecognized mechanism during SPF processing of domain of $query->{sender}"
      :                         "domain of $query->{sender} does not designate permitted sender hosts" );
 
 }
@@ -328,7 +332,7 @@ sub spfquery {
   if ($query->{ipv4} and
       $query->{ipv4}=~ /^127\./) { return "pass", "localhost is always allowed." }
 
-  if ($query->is_looping)            { return "UNKNOWN", "loop encountered: " . $query->loop_report }
+  if ($query->is_looping)            { return "UNKNOWN", $query->is_looping }
   if ($query->can_use_cached_result) { return $query->cached_result; }
   else                               { $query->tell_cache_that_lookup_is_underway; }
 
@@ -358,7 +362,7 @@ sub spfquery {
     }
 
     next if not defined $result;
-    if ($result and $result ne "unknown") {
+    if ($result and $result !~ /^unknown/) {
       $query->debuglog("  saving result $result to cache point and returning.");
       $query->save_result_to_cache($result, $comment);
       return $result, $query->interpolate_explanation($comment);
@@ -406,15 +410,20 @@ sub cache_point {
 sub is_looping {
   my $query = shift;
   my $cache_point = $query->cache_point;
-  return 1 if (exists $Domains_Queried->{$cache_point}
-	       and
-	       not defined $Domains_Queried->{$cache_point}->[0]);
+  return (join " ", "loop encountered:", @{$query->{loop_report}})
+    if (exists $Domains_Queried->{$cache_point}
+	and
+	not defined $Domains_Queried->{$cache_point}->[0]);
+
+  return (join " ", "exceeded maximum recursion depth:", @{$query->{loop_report}})
+    if ($query->{depth} >= $query->max_recursion_depth);
+
   return 0;
 }
 
-sub loop_report {
+sub max_recursion_depth {
   my $query = shift;
-  return join " ", @{$query->{loop_report}};
+  return $query->{max_recursion_depth} || $MAX_RECURSION_DEPTH;
 }
 
 sub can_use_cached_result {
@@ -495,130 +504,6 @@ sub get_ptr_domain {
     return undef;
 }
 
-# 7.1 Macro definitions
-# 
-#    Certain directives perform macro interpolation on their arguments.
-# 
-#      macro-string = *( macro-char / VCHAR )
-#      macro-char   = ( '%{' alpha *digit [ 'r' ] *delim '}' )
-#                     / '%%'
-#                     / '%_'
-#                     / '%-'
-# 
-#    A literal '%' is expressed by '%%'.
-#    %_ expands to a single " " space.
-#    %- expands to a URL-encoded space, viz. "%20".
-# 
-#    Mechanism directives expand the following macro letters:
-# 
-#       u = local-part of current-sender
-#       l = local-part of current-sender
-#       d = current-domain
-#       i = SMTP client IP
-#       p = SMTP client domain name
-#       v = client IP version string - in-addr for ipv4 or ip6 for ipv6
-# 
-#    In Explanation records, all of the above macros are expanded, and the
-#    following as well:
-# 
-#       h = HELO/EHLO domain
-#       s = current-sender
-#       t = current timestamp in UTC epoch seconds notation
-# 
-#    The uppercase versions of those macros are URL-encoded.
-# 
-#    A '%' character not followed by a '{', '%', '-', or '_' character
-#    MUST be interpreted
-#    as a literal.  SPF publishers SHOULD NOT rely on this feature; they
-#    MUST escape % literals.  For example, an explanation TXT record
-#       Your spam ratio has increased by 581%
-#    is incorrect.  Instead, say
-#       Your spam ratio has increased by 581%%
-# 
-#    Legal modifiers are
-# 
-#         'r'    ; reverse value, splitting on dots by default
-#         *DIGIT ; one or more digits
-# 
-#    Modifiers may be suffixed by one or more splitting characters.
-#    If none are present, the default is a "." dot.  Splitting characters
-#    MUST be non-alphanumeric.
-# 
-#    The 'r' modifier indicates a reversal operation: if the client IP
-#    address were 192.0.2.1, the macro %{i} would expand to "192.0.2.1"
-#    and the macro %{ir} would expand to "1.2.0.192".
-# 
-#    The DIGITs modifier indicates the number of right-hand parts to use
-#    after optional reversal.  The modifier MUST be nonzero.  If the
-#    DIGITs specify more parts than are available, all the available parts
-#    are used.  If the DIGIT was 5, and only 3 parts were available, the
-#    macro interpreter would pretend the DIGIT was 3.
-# 
-#    If both the DIGITs and the 'r' modifier are used, DIGITs must go
-#    first, and 'r' second.
-# 
-#    For the "u" and "s" macros: when the local-part has no length, the
-#    string "mailer-daemon" will be used instead.  If the splitting
-#    characters include a "-", "mailer-daemon" will be split accordingly.
-#    After splitting, parts are always rejoined using "." and not the
-#    original splitting characters.
-# 
-#    The "p" macro expands to the validated domain name of the SMTP
-#    client.  The validation procedure is described in section 3.3.
-#    If there are no validated domain names, the word "unknown" is
-#    substituted.  If multiple validated domain names exist, one of
-#    them is chosen.
-# 
-#    If the result of macro expansion exceeds 255 characters (the maximum
-#    length of a domain name), the left side is truncated and the right
-#    side preserved.
-# 
-# 7.2 Expansion Examples
-# 
-#    The <current-sender> is strong-bad@email.example.com.
-#    The IPv4 SMTP client IP is 192.0.2.3.
-#    The IPv6 SMTP client IP is 5f05:2000:80ad:5800::1.
-#    The PTR domain name of the client IP is mx.exmaple.org.
-# 
-#    macro                 expansion
-#    -------------------------------
-#    %{d}          email.example.com
-#    %{d4}         email.example.com
-#    %{d3}         email.example.com
-#    %{d2}               example.com
-#    %{d1}                       com
-#    %{p}             mx.example.org
-#    %{p2}               example.org
-#    %{dr}         com.example.email
-#    %{d2r}            example.email
-#    %{u}                 strong-bad
-#    %{u-}                strong.bad
-#    %{ur}                strong-bad
-#    %{ur-}               bad.strong
-#    %{u1r-}                  strong
-# 
-#    macro-string                                   expansion
-#    ---------------------------------------------------------------------
-#    %{ir}.${v}._spf.%{d2}              3.2.0.192.in-addr._spf.example.com
-#    %{ur-}.lp._spf.%{d2}                   bad.strong.lp._spf.example.com
-# 
-#    %{ur-}.lp.%{ir}.${v}._spf.%{d2}
-#                         bad.strong.lp.3.2.0.192.in-addr._spf.example.com
-# 
-#    %{ir}.${v}.%{u1r-}.lp._spf.%{d2}
-#                             3.2.0.192.in-addr.strong.lp._spf.example.com
-# 
-#    %{p2}.trusted-domains.example.net
-#                                  example.org.trusted-domains.example.net
-# 
-#    %{p2}.trusted-domains.example.net
-#                                  example.org.trusted-domains.example.net
-# 
-#    IPv6:
-#    %{ir}.example.org              1.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.8.
-#                                    5.d.a.0.8.0.0.0.2.5.0.f.5.example.org
-# 
-
 sub macro_substitute_item {
     my $query = shift;
     my $arg = shift;
@@ -636,13 +521,13 @@ sub macro_substitute_item {
     my $newval = $arg;
     my $timestamp = time;
 
-    $newval = $query->{localpart}       if (lc $field eq 'l');
     $newval = $query->{localpart}       if (lc $field eq 'u');
-    $newval = $query->{sender}          if (lc $field eq 's');
+    $newval = $query->{localpart}       if (lc $field eq 'l');
     $newval = $query->{domain}          if (lc $field eq 'd');
+    $newval = $query->{sender}          if (lc $field eq 's');
+    $newval = $query->ip                if (lc $field eq 'i');
     $newval = $timestamp                if (lc $field eq 't');
     $newval = $query->{helo}            if (lc $field eq 'h');
-    $newval = $query->ip                if (lc $field eq 'i');
     $newval = $query->get_ptr_domain    if (lc $field eq 'p');
     $newval = $query->{ipv4} ? 'in-addr' : 'ip6'
                                         if (lc $field eq 'v');
@@ -715,7 +600,14 @@ sub evaluate_mechanism {
   }
   else {
     $query->debuglog("  evaluate_mechanism: unrecognized mechanism $mechanism, returning unknown.");
-    return UNKNOWN => "unrecognized mechanism $mechanism";
+    my $unknown_string = join ("",
+			       "UNKNOWN",
+			       " ",
+			       ($modifier eq "+" ? "" : $modifier),
+			       $mechanism,
+			       ($argument ? ":" : ""),
+			       $argument);
+    return $unknown_string => "unrecognized mechanism $mechanism";
     return undef;
   }
 
@@ -1034,23 +926,9 @@ sub interpolate_explanation {
 # 		      algo
 # ----------------------------------------------------------
 
-=head2 EXPORT
-
-None by default.
-
-=head1 AUTHOR
-
-Meng Weng Wong, <mengwong+spf@pobox.com>
-
-=head1 SEE ALSO
-
-http://spf.pobox.com/
-
-=cut
-
 {
   package DirectiveSet;
-  
+
   sub new {
     my $class = shift;
     my $current_domain = shift;
@@ -1089,6 +967,7 @@ http://spf.pobox.com/
       $query->debuglog("  lookup:   TXT $_");
 
       # parse the policy record
+      
       while (/\S/) {
 	s/^\s*(\S+)\s*//;
 	my $word = $1;
@@ -1101,9 +980,17 @@ http://spf.pobox.com/
 	  next;
 	}
 
+	# modifiers always have an = sign.
+	if (my ($lhs, $rhs) = $word =~ /^([^:\/]+)=(\S*)$/) {
+	  # $query->debuglog("  lookup:   TXT modifier found: $lhs = $rhs");
+
+	  $directive_set->{modifiers}->{lc $lhs} = $rhs;
+	  next;
+	}
+
 	# RHS optional, defaults to domain.
 	# [:/] matches a:foo and a/24
-	if (my ($prefix, $lhs, $rhs) = $word =~ /^([-~+?]?)(all|include|a|mx|ptr|pi|ip4|ip6|exists)([\/:]\S*)?/i) {
+	if (my ($prefix, $lhs, $rhs) = $word =~ /^([-~+?]?)([\w_-]+)([\/:]\S*)?$/i) {
 	  $rhs =~ s/^://;
 	  $prefix ||= "+";
 	  $query->debuglog("  lookup:   TXT prefix=$prefix, lhs=$lhs, rhs=$rhs");
@@ -1111,54 +998,23 @@ http://spf.pobox.com/
 	  next;
 	}
 
-	# modifiers
-	if (my ($lhs, $rhs) = $word =~ /^(default|exp|redirect)=(\S+)?/i) {
-	  $lhs = lc $lhs;
-
-	  # $query->debuglog("  lookup:   TXT $lhs = $rhs");
-
-	  # repeat definitions of a modifier are a hard syntax error.
-	  if (defined $directive_set->{$lhs}) {
-	    $directive_set->{hard_syntax_error} = "spf error: $lhs may not be defined more than once";
-	    $query->debuglog("  lookup:   hard syntax error: $directive_set->{hard_syntax_error}");
-	    last;
-	  }
-
-	  if ($lhs eq "exp")      { $directive_set->{exp}      = $rhs; }
-	  if ($lhs eq "redirect") { $directive_set->{redirect} = $rhs; }
-	  if ($lhs eq "default")  { $directive_set->{default}  = $rhs; }
-
-	  next;
-	}
-
-	# extension mechanism
-	{
-	  # $query->debuglog("  lookup:   TXT some kind of extension found: $word");
-	  my ($lhs, $rhs) = split /=/, $word, 2;
-	  # $query->debuglog("  lookup:   TXT extension: $lhs : $rhs");
-	  push @{$directive_set->{modifiers}}, [lc $lhs => $rhs];
-	  next;
-	}
       }
-
-      if (my $rhs = delete $directive_set->{default}) {
-	push @{$directive_set->{mechanisms}}, [ $query->value2shorthand($rhs), all => undef ];
-      }
-
-      $directive_set->{mechanisms} = []           if not $directive_set->{mechanisms};
-      $directive_set->{exp}        = undef        if not $directive_set->{exp};
-
-      $query->debuglog("  lookup:  mec mechanisms=@{[$directive_set->show_mechanisms]}");
-      $query->debuglog("  lookup:  exp exp=$directive_set->{exp}");
-
-      return $directive_set;
     }
+
+    if (my $rhs = delete $directive_set->{modifiers}->{default}) {
+      push @{$directive_set->{mechanisms}}, [ $query->value2shorthand($rhs), all => undef ];
+    }
+
+    $directive_set->{mechanisms} = []           if not $directive_set->{mechanisms};
+    $query->debuglog("  lookup:  mec mechanisms=@{[$directive_set->show_mechanisms]}");
+    return $directive_set;
   }
 
   sub version      {   shift->{version}      }
   sub mechanisms   { @{shift->{mechanisms}}  }
-  sub explanation  {   shift->{exp}          }
-  sub redirect     {   shift->{redirect}     }
+  sub explanation  {   shift->{modifiers}->{exp}      }
+  sub redirect     {   shift->{modifiers}->{redirect} }
+  sub get_modifier {   shift->{modifiers}->{shift()}  }
   sub syntax_error {   shift->{syntax_error} }
 
   sub show_mechanisms   {
@@ -1168,3 +1024,18 @@ http://spf.pobox.com/
 }
 
 1;
+
+=head2 EXPORT
+
+None by default.
+
+=head1 AUTHOR
+
+Meng Weng Wong, <mengwong+spf@pobox.com>
+
+=head1 SEE ALSO
+
+http://spf.pobox.com/
+
+=cut
+

@@ -239,44 +239,48 @@ BEGIN {
 # # no entries for joe.
 
 # 'SPF1_TEST(70):v=spf1 exists\072%{lr+=}.lp._spf.spf1-test.mailzone.com ~all:60
-104 70.spf1-test.mailzone.com  192.0.2.103        softfail
-105 bob+1@70.spf1-test.mailzone.com  192.0.2.103          pass
-106 bob+2@70.spf1-test.mailzone.com  192.0.2.103          pass
-107   bob@70.spf1-test.mailzone.com  192.0.2.103          pass
-108 joe+1@70.spf1-test.mailzone.com  192.0.2.103          softfail
-109 joe-2@70.spf1-test.mailzone.com  192.0.2.103          softfail
-110 moe-1@70.spf1-test.mailzone.com  192.0.2.103          softfail
+87 droid@70.spf1-test.mailzone.com  192.0.2.103          softfail
+
+88 bob+1@70.spf1-test.mailzone.com  192.0.2.103          pass
+89 bob+2@70.spf1-test.mailzone.com  192.0.2.103          pass
+90   bob@70.spf1-test.mailzone.com  192.0.2.103          pass
+91 joe+1@70.spf1-test.mailzone.com  192.0.2.103          softfail
+92 joe-2@70.spf1-test.mailzone.com  192.0.2.103          softfail
+93 moe-1@70.spf1-test.mailzone.com  192.0.2.103          softfail
+
+# client should substitute mailer-daemon when no localpart.
+94 70.spf1-test.mailzone.com  192.0.2.103                pass
 
 # '80.spf1-test.mailzone.com:v=spf1 a mx exists\072%{ir}.%{v}._spf.80.spf1-test.mailzone.com ptr ~all:60
 # =80.spf1-test.mailzone.com:208.210.124.180:60
 # +80.2.0.192.in-addr._spf.80.spf1-test.mailzone.com:127.0.0.2:60
-87 80.spf1-test.mailzone.com    64.236.24.4       softfail
-88 80.spf1-test.mailzone.com    208.210.124.180       pass
-89 80.spf1-test.mailzone.com    192.0.2.80       pass
+95 80.spf1-test.mailzone.com    64.236.24.4       softfail
+96 80.spf1-test.mailzone.com    208.210.124.180       pass
+97 80.spf1-test.mailzone.com    192.0.2.80       pass
 
 # '90.spf1-test.mailzone.com:v=spf1  ip4\072192.0.2.128/25 ~all:60
-90 90.spf1-test.mailzone.com    192.0.2.1       softfail
-91 90.spf1-test.mailzone.com    192.0.2.127       softfail
-92 90.spf1-test.mailzone.com    192.0.2.129       pass
+98 90.spf1-test.mailzone.com    192.0.2.1       softfail
+99 90.spf1-test.mailzone.com    192.0.2.127       softfail
+100 90.spf1-test.mailzone.com    192.0.2.129       pass
 
 # '91.spf1-test.mailzone.com:v=spf1 -ip4\072192.0.2.128/25 ip4\072192.0.2.0/24 ~all:60
-93 91.spf1-test.mailzone.com    192.168.1.1       softfail
-94 91.spf1-test.mailzone.com    192.0.2.127       pass
-95 91.spf1-test.mailzone.com    192.0.2.129       fail
+101 91.spf1-test.mailzone.com    192.168.1.1       softfail
+102 91.spf1-test.mailzone.com    192.0.2.127       pass
+103 91.spf1-test.mailzone.com    192.0.2.129       fail
 
 # '92.spf1-test.mailzone.com:v=spf1 ~ip4\072192.0.2.192/26 ip4\072192.0.2.128/25 -ip4\072192.0.2.0/24 ~all:60
-96 92.spf1-test.mailzone.com    192.168.2.1       softfail
-97 92.spf1-test.mailzone.com    192.0.2.1       fail
-98 92.spf1-test.mailzone.com    192.0.2.129       pass
-99 92.spf1-test.mailzone.com    192.0.2.193       softfail
+104 92.spf1-test.mailzone.com    192.168.2.1       softfail
+105 92.spf1-test.mailzone.com    192.0.2.1       fail
+106 92.spf1-test.mailzone.com    192.0.2.129       pass
+107 92.spf1-test.mailzone.com    192.0.2.193       softfail
 
 # '95.spf1-test.mailzone.com:v=spf1 exists\072%{p}.whitelist.spf1-test.mailzone.com ~all:60
 # '96.spf1-test.mailzone.com:v=spf1 -exists\072%{d}.blacklist.spf1-test.mailzone.com ~all:60
 # '97.spf1-test.mailzone.com:v=spf1 exists\072%{p}.whitelist.spf1-test.mailzone.com -exists\072%{d}.blacklist.spf1-test.mailzone.com ~all:60
-100 95.spf1-test.mailzone.com  208.210.124.180       pass
-101 95.spf1-test.mailzone.com  208.210.124.1       softfail
-102 96.spf1-test.mailzone.com  192.0.2.193       fail
-103 97.spf1-test.mailzone.com  208.210.124.180       pass
+108 95.spf1-test.mailzone.com  208.210.124.180       pass
+109 95.spf1-test.mailzone.com  208.210.124.1       softfail
+110 96.spf1-test.mailzone.com  192.0.2.193       fail
+111 97.spf1-test.mailzone.com  208.210.124.180       pass
 
 # +*.spf1-test.mailzone.com.blacklist.spf1-test.mailzone.com:127.0.0.2:60
 # +*.spf1-test.mailzone.com.whitelist.spf1-test.mailzone.com:127.0.0.2:60
@@ -284,45 +288,47 @@ BEGIN {
 # '98.spf1-test.mailzone.com:v=spf1 a/26 mx/26 ~all:60
 # +98.spf1-test.mailzone.com:192.0.2.98:60
 # @98.spf1-test.mailzone.com::80.spf1-test.mailzone.com:10:60
-111 98.spf1-test.mailzone.com  192.0.2.1          softfail
-112 98.spf1-test.mailzone.com  192.0.2.98         pass
-113 98.spf1-test.mailzone.com  192.0.2.99         pass
-114 98.spf1-test.mailzone.com  208.210.124.180    pass
-115 98.spf1-test.mailzone.com  208.210.124.1      softfail
-116 98.spf1-test.mailzone.com  208.210.124.181    pass
+112 98.spf1-test.mailzone.com  192.0.2.1          softfail
+113 98.spf1-test.mailzone.com  192.0.2.98         pass
+114 98.spf1-test.mailzone.com  192.0.2.99         pass
+115 98.spf1-test.mailzone.com  208.210.124.180    pass
+116 98.spf1-test.mailzone.com  208.210.124.1      softfail
+117 98.spf1-test.mailzone.com  208.210.124.181    pass
 
 # 'SPF1_TEST(08):v=spf2                       default=softdeny      default=deny  :60
 # 'SPF1_TEST(09):v=spf2    scope=header-from scope=envelope         default=deny  :60
-117 08.spf1-test.mailzone.com  192.0.2.1     softfail
-118 09.spf1-test.mailzone.com  192.0.2.1     fail
+118 08.spf1-test.mailzone.com  192.0.2.1     softfail
+119 09.spf1-test.mailzone.com  192.0.2.1     fail
 
 # '99.spf1-test.mailzone.com:v=spf1 ~all exp=99txt.spf1-test.mailzone.com moo:60
 # '99txt.spf1-test.mailzone.com:%u %s %d %t %h %i %% %U %S %D %T %H %I %% moo:60
-119 99.spf1-test.mailzone.com  192.0.2.1     softfail
+120 99.spf1-test.mailzone.com  192.0.2.1     softfail
 
 # testing redirection
 # '100.spf1-test.mailzone.com:v=spf1      redirect=98.spf1-test.mailzone.com:60
-120 100.spf1-test.mailzone.com  192.0.2.1     softfail
-121 100.spf1-test.mailzone.com  192.0.2.98    pass
+121 100.spf1-test.mailzone.com  192.0.2.1     softfail
+122 100.spf1-test.mailzone.com  192.0.2.98    pass
 
 # '101.spf1-test.mailzone.com:v=spf1 -all redirect=98.spf1-test.mailzone.com:60
-121 101.spf1-test.mailzone.com  192.0.2.98    fail
+123 101.spf1-test.mailzone.com  192.0.2.98    fail
 
 # '102.spf1-test.mailzone.com:v=spf1 ?all redirect=98.spf1-test.mailzone.com:60
-121 102.spf1-test.mailzone.com  192.0.2.98    pass
+124 102.spf1-test.mailzone.com  192.0.2.98    pass
 
 # '103.spf1-test.mailzone.com:v=spf1      redirect=98.%{d3}:60
-121 103.spf1-test.mailzone.com  192.0.2.98    pass
+125 103.spf1-test.mailzone.com  192.0.2.98    pass
 
 # '104.spf1-test.mailzone.com:v=spf1      redirect=105.%{d3}:60
 # '105.spf1-test.mailzone.com:v=spf1      redirect=106.%{d3}:60
 # '106.spf1-test.mailzone.com:v=spf1      redirect=107.%{d3}:60
 # '107.spf1-test.mailzone.com:v=spf1       include\072104.%{d3}:60
-121	104.spf1-test.mailzone.com	192.0.2.98	unknown	loop encountered: 104.spf1-test.mailzone.com redirects to 105.spf1-test.mailzone.com redirects to 106.spf1-test.mailzone.com redirects to 107.spf1-test.mailzone.com includes 104.spf1-test.mailzone.com	domain of droid@104.spf1-test.mailzone.com has SPF misconfiguration
+126,127,128	droid@104.spf1-test.mailzone.com	192.0.2.98	unknown	loop encountered: 104.spf1-test.mailzone.com redirects to 105.spf1-test.mailzone.com redirects to 106.spf1-test.mailzone.com redirects to 107.spf1-test.mailzone.com includes 104.spf1-test.mailzone.com	an error occurred during SPF processing of domain of droid@104.spf1-test.mailzone.com
+
+129,130,131	droid@110.spf1-test.mailzone.com	192.0.2.98	unknown some:unrecognized=mechanism	unrecognized mechanism some	encountered unrecognized mechanism during SPF processing of domain of droid@110.spf1-test.mailzone.com
 
 );
 
-# keep the numbers straight with perl -ple 'BEGIN { $num = 1 } s/^(\d+)/++$num/e;'
+# keep the numbers straight with perl -ple 'BEGIN { $num = 1 } s/(?:^|\G)(\d+)(,)?/++$num . "$2"/eg;'
 
   plan tests => 1+ @test_table ;
 };
@@ -337,7 +343,7 @@ ok(1);
 foreach my $tuple (@test_table) {
   my ($num, $domain, $ipv4, $expected_result, $expected_smtp_comment, $expected_header_comment) = $tuple =~ /\t/ ? split(/\t/, $tuple) : split(' ', $tuple);
 
-  my $sender = ($domain =~ /\@/) ? $domain : "droid\@$domain";
+  my $sender = $domain;
   if ($domain =~ /\@/) { ($domain) = $domain =~ /\@(.+)/ }
 
   my ($result, $smtp_comment, $header_comment) = eval  { new Mail::SPF::Query (ipv4   => $ipv4,
