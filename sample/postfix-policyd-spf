@@ -3,7 +3,7 @@
 # mengwong@pobox.com
 # Wed Dec 10 03:52:04 EST 2003
 # postfix-policyd-spf
-# version 1.01
+# version 1.02
 # see http://spf.pobox.com/
 
 use Fcntl;
@@ -35,6 +35,7 @@ my $syslog_socktype = 'unix'; # inet, unix, stream, console
 my $syslog_facility = "mail";
 my $syslog_options  = "pid";
 my $syslog_priority = "info";
+my $syslog_ident    = "postfix/policy-spf";
 
 # ----------------------------------------------------------
 #		   minimal documentation
@@ -137,7 +138,7 @@ select((select(STDOUT), $| = 1)[0]);
 # syslog so that people can actually see our messages.
 #
 setlogsock $syslog_socktype;
-openlog $0, $syslog_options, $syslog_facility;
+openlog $syslog_ident, $syslog_options, $syslog_facility;
 
 # ----------------------------------------------------------
 # 			    main

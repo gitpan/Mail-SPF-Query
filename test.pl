@@ -6,6 +6,11 @@
 
 use Test;
 use strict;
+use Getopt::Std;
+
+my %opts;
+
+getopts('d:',\%opts);
 
 my @test_table;
 
@@ -24,15 +29,25 @@ use Mail::SPF::Query;
 # 1: did the library load okay?
 ok(1);
 
+if ($opts{d}) {
+    open(TEST, ">$opts{d}") || die "Cannot open $opts{d} for output";
+}
+
+my $testnum = 2;
+
 #########################
 
 foreach my $tuple (@test_table) {
   my ($num, $domain, $ipv4, $expected_result, $expected_smtp_comment, $expected_header_comment) = $tuple =~ /\t/ ? split(/\t/, $tuple) : split(' ', $tuple);
 
+  my ($actual_result, $actual_smtp_comment, $actual_header_comment);
+
   my ($sender, $localpolicy) = split(':', $domain, 2);
   $sender =~ s/\\([0-7][0-7][0-7])/chr(oct($1))/ge;
   $domain = $sender;
   if ($domain =~ /\@/) { ($domain) = $domain =~ /\@(.+)/ }
+
+  my $testcnt = 3;
 
   if ($expected_result =~ /=(pass|fail),/) {
       for (my $debug = 0; $debug < 2; $debug++) {
@@ -42,16 +57,19 @@ foreach my $tuple (@test_table) {
                                                     helo   => $domain,
                                                     debug  => $debug,
                                                     local  => $localpolicy,
-                                                    sanitize => 1,
                                                    ); };
 
           my $ok = 1;
           my $header_comment;
 
+          $actual_result = "";
+
           foreach my $e_result (split(/,/, $expected_result)) {
               if ($e_result !~ /=/) {
                   my ($msg_result, $smtp_comment);
                   ($msg_result, $smtp_comment, $header_comment) = eval { $query->message_result2 };
+
+                  $actual_result .= $msg_result;
 
                   $ok = ok($msg_result, $e_result) if (!$debug);
                   if (!$ok) {
@@ -60,6 +78,9 @@ foreach my $tuple (@test_table) {
               } else {
                   my ($recip, $expected_recip_result) = split(/=/, $e_result, 2);
                   my ($recip_result, $smtp_comment) = eval { $query->result2(split(';',$recip)) };
+
+                  $actual_result .= "$recip=$recip_result,";
+                  $testcnt++;
 
                   $ok = ok($recip_result, $expected_recip_result) if (!$debug);
                   if (!$ok) {
@@ -73,6 +94,8 @@ foreach my $tuple (@test_table) {
           if ($expected_header_comment) {
               $ok &= ok($header_comment, $expected_header_comment) if (!$debug);
           }
+          $actual_header_comment = $header_comment;
+          $actual_smtp_comment = '.';
           last if ($ok);
       }
   } else {
@@ -81,7 +104,6 @@ foreach my $tuple (@test_table) {
                                                                                    helo   => $domain,
                                                                                    local  => $localpolicy,
                                                                                    default_explanation => "explanation",
-                                                                                   sanitize => 1,
                                                                                   )->result; };
       $header_comment =~ s/^\S+: //; # strip the reporting hostname prefix
 
@@ -90,6 +112,10 @@ foreach my $tuple (@test_table) {
                 : (ok($result, $expected_result) &&
                    ok($smtp_comment, $expected_smtp_comment) &&
                    ok($header_comment, $expected_header_comment)));
+
+      $actual_smtp_comment = $smtp_comment;
+      $actual_result = $result;
+      $actual_header_comment = $header_comment;
       
       if (not $ok) {
         Mail::SPF::Query->clear_cache;
@@ -98,13 +124,18 @@ foreach my $tuple (@test_table) {
                                                          helo   => $domain,
                                                          debug  => 1,
                                                          local  => $localpolicy,
-                                                         sanitize => 1,
                                                         )->result) };
         if ($@) {
           print "  trapped error: $@\n";
           next;
         }
       }
+  }
+  if ($opts{d}) {
+      $num = join(",", $testnum .. $testnum + $testcnt - 1);
+      $testnum += $testcnt;
+      print TEST join("\t", $num, $sender . ($localpolicy ? ":$localpolicy": ""), $ipv4, $actual_result, $actual_smtp_comment, $actual_header_comment),
+            "\n";
   }
 }
 

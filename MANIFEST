@@ -9,6 +9,7 @@ spfd
 spfquery
 sample/postfix-policyd-spf
 sample/sendmail-milter
+sample/sendmail-milter-INSTALL.txt
 sample/exim-acl
 sample/spf.py
 sample/README

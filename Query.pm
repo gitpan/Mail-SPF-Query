@@ -14,6 +14,24 @@ package Mail::SPF::Query;
 #
 # license: apache.  opensource.
 #
+# The result of evaluating a SPF record associated with a domain is one of:
+# 
+# none - the domain does not have an SPF record.
+# 
+# neutral - domain explicitly wishes you to pretend it had no SPF record.
+# 
+# unknown - a permanent error -- such as missing SPF record
+#           during "include" or "redirect", parse error, unknown
+#           mechanism, record loop
+# 
+# error - some type of temporary failure, usually DNS related
+# 
+# softfail - explicit softfail --- please apply strict antispam checks
+# 
+# fail - explicit fail --- MTA may reject, MUA may discard
+# 
+# pass - explicit pass --- message is not a forgery
+#
 # TODO: add ipv6 support
 #
 # BUGS:
@@ -49,7 +67,10 @@ my $MAX_LOOKUP_COUNT    = 20;
 
 my $Domains_Queried = {};
 
-$VERSION = "1.99";
+# if not set, then softfail is treated as neutral.
+my $softfail_supported = 1;
+
+$VERSION = "1.991";
 
 $CACHE_TIMEOUT = 120;
 
@@ -67,7 +88,7 @@ Mail::SPF::Query - query Sender Permitted From for an IP,email,helo
 =head1 SYNOPSIS
 
   my $query = new Mail::SPF::Query (ip => "127.0.0.1", sender=>'foo@example.com', helo=>"somehost.example.com", trusted=>1, guess=>1);
-  my ($result,           # pass | fail | error | unknown [mechanism]
+  my ($result,           # pass | fail | softfail | neutral | none | error | unknown [mechanism]
       $smtp_comment,     # "please see http://spf.pobox.com/why.html?..."  when rejecting, return this string to the SMTP client
       $header_comment,   # prepend_header("Received-SPF" => "$result ($header_comment)")
       $spf_record,       # "v=spf1 ..." original SPF record for the domain
@@ -127,7 +148,7 @@ don't have one.  Use the first style.
      guess => 1,                      # do best_guess if no SPF record
      default_explanation => 'Please see http://spf.my.isp/spferror.html for details',
      max_lookup_count => 20,          # total number of SPF include/redirect queries
-     sanitize => 1,                   # sanitize all returned strings
+     sanitize => 0,                   # do not sanitize all returned strings
      myhostname => "foo.example.com", # prepended to header_comment
 
   if ($@) { warn "bad input to Mail::SPF::Query: $@" }
@@ -139,7 +160,7 @@ right -- i.e. spf.trusted-forwarder.org is not checked.
 
 Set C<guess=E<gt>1> to turned on automatic best_guess processing.
 This will use the best_guess SPF record when one cannot be found
-in the DNS. Note that this can only return C<pass> or C<unknown>. 
+in the DNS. Note that this can only return C<pass> or C<neutral>. 
 The C<trusted> and C<local> flags also operate when the best_guess is being used.
 
 Set C<local=E<gt>'include:local.domain'> to include some extra processing just before a C<-all> or C<?all>.
@@ -150,7 +171,7 @@ a specific explanation. The default value will direct the user to a page at spf.
 "Please see http://spf.pobox.com/why.html?sender=%{S}&ip=%{I}&receiver=%{xR}". Note that the
 string has macro substitution performed.
 
-Set C<sanitize> to 1 to get all the returned strings sanitized. Alternatively, pass a function reference
+Set C<sanitize> to 0 to get all the returned strings unsanitized. Alternatively, pass a function reference
 and this function will be used to sanitize the returned values. The function must take a single string
 argument and return a single string which contains the sanitized result.
 
@@ -179,7 +200,7 @@ sub new {
 
   $query->{default_record} = $GUESS_MECHS if ($query->{guess});
 
-  if ($query->{sanitize} && !ref($query->{sanitize})) {
+  if (($query->{sanitize} && !ref($query->{sanitize})) || !defined($query->{sanitize})) {
       # Apply default sanitizer
       $query->{sanitize} = \&strict_sanitize;
   }
@@ -239,7 +260,7 @@ sub new {
 
   my ($result, $smtp_comment, $header_comment, $spf_record) = $query->result();
 
-C<$result> will be one of C<pass>, C<fail>, C<unknown [...]>, or C<error>.
+C<$result> will be one of C<pass>, C<fail>, C<softfail>, C<neutral>, C<none>, C<error> or C<unknown [...]>.
 
 C<pass> means the client IP is a designated mailer for the
 sender.  The mail should be accepted subject to local policy
@@ -249,11 +270,23 @@ C<fail> means the client IP is not a designated mailer, and
 the sender wants you to reject the transaction for fear of
 forgery.
 
-C<unknown [...]> means the domain either does not publish
-SPF data or has a configuration error in the published data.
-If the data contained an unrecognized mechanism, it will be
-presented following "unknown".  You should test for unknown
-using a regexp C</^unknown/i> rather than C<eq "unknown">.
+C<softfail> means the client IP is not a designated mailer, and
+the sender prefers that you reject the transaction for fear of
+forgery. However, this is explicitly left as a local decision.
+The C<softfail> status is often used during initial deployment
+of SPF records by a domain.
+
+C<neutral> means that the sender makes no assertion about the
+status of the client IP.
+
+C<none> means that there is no SPF record for this domain.
+
+C<unknown [...]> means the domain has a configuration error in
+the published data or defines a mechanism which this library
+does not understand.  If the data contained an unrecognized
+mechanism, it will be presented following "unknown".  You
+should test for unknown using a regexp C</^unknown/> rather
+than C<eq "unknown">.
 
 C<error> means the DNS lookup encountered a temporary error
 during processing.
@@ -274,8 +307,13 @@ and such that describe the domain.
 Note that the strings returned by this method (and most of the other methods)
 are (at least partially) under the control of the sender's 
 domain. This means that, if the sender is an attacker,
-the contents can be assumed to be hostile. Thus they should
-be sanitized before being used for sensitive purposes.
+the contents can be assumed to be hostile. 
+The various methods that return these strings make sure
+that (by default) the strings returned contain only
+characters in the range 32 - 126. This behavior can
+be changed by setting C<sanitize> to 0 to turn off sanitization
+entirely. You can also set C<sanitize> to a function reference to
+perform custom sanitization.
 In particular, assume that the C<smtp_comment> might
 contain a newline character. 
 
@@ -292,9 +330,9 @@ sub result {
 
   my ($result, $smtp_explanation, $smtp_why) = $query->spfquery( ($query->{best_guess} ? $query->{guess_mechs} : () ) );
 
-  # print STDERR "*** result = $result\n";
+  # print STDERR "*** result = $result, exp = $smtp_explanation, why = $smtp_why\n";
 
-  my $smtp_comment = join(': ', $smtp_explanation, $smtp_why);
+  my $smtp_comment = ($smtp_explanation && $smtp_why) ? "$smtp_explanation: $smtp_why" : ($smtp_explanation || $smtp_why);
 
   $query->{smtp_comment} = $smtp_comment;
 
@@ -318,13 +356,15 @@ sub header_comment {
   if ($result eq "pass" and $query->{smtp_comment} eq "localhost is always allowed.") { return $query->{smtp_comment} }
 
   return
-    (  $result eq "pass"     ? "$query->{spf_source} designates $ip as permitted sender"
-     : $result eq "fail"     ? "$query->{spf_source} does not designate $ip as permitted sender"
-     : $result eq "softfail" ? "transitioning $query->{spf_source} does not designate $ip as permitted sender"
-     : $result eq "error"    ? "error in processing during lookup of $query->{sender}"
-     : $result eq "UNKNOWN"  ? "unable to determine SPF status for $query->{sender}"
-     : $result =~ /^UNKNOWN/ ? "encountered unrecognized mechanism during SPF processing of $query->{spf_source}"
-     :                         "$query->{spf_source} does not designate permitted sender hosts" );
+    (  $result eq "pass"      ? "$query->{spf_source} designates $ip as permitted sender"
+     : $result eq "fail"      ? "$query->{spf_source} does not designate $ip as permitted sender"
+     : $result eq "softfail"  ? "transitioning $query->{spf_source} does not designate $ip as permitted sender"
+     : $result =~ /^unknown / ? "encountered unrecognized mechanism during SPF processing of $query->{spf_source}"
+     : $result eq "unknown"   ? "error in processing during lookup of $query->{sender}"
+     : $result eq "neutral"   ? "$ip is neither permitted nor denied by domain of $query->{sender}"
+     : $result eq "error"     ? "encountered temporary error during SPF processing of $query->{spf_source}"
+     : $result eq "none"      ? "$query->{spf_source} does not designate permitted sender hosts" 
+     :                          "could not perform SPF query for $query->{spf_source}" );
 
 }
 
@@ -340,7 +380,7 @@ system may be a MX secondary for some (but not all) of the
 recipients for a multi-recipient message, which is why
 result2 takes an argument list.  See also C<message_result2()>.
 
-C<$result> will be one of C<pass>, C<fail>, C<unknown [...]>, or C<error>.
+C<$result> will be one of C<pass>, C<fail>, C<neutral [...]>, or C<unknown>.
 See C<result()> above for meanings.
 
 If you have MX secondaries and if you are unable to
@@ -391,7 +431,7 @@ sub result2 {
   my @recipients = @_;
 
   if (!$query->{result2}) {
-      my $all_mx_secondary = 'unknown';
+      my $all_mx_secondary = 'neutral';
 
       foreach my $recip (@recipients) {
           my ($rhost) = $recip =~ /([^@]+)$/;
@@ -467,7 +507,7 @@ after zero or more calls to C<result2()>. It will always be the last
 status returned by C<result2()>, or the status returned by C<result()> if
 C<result2()> was never called.
 
-C<$result> will be one of C<pass>, C<fail>, C<unknown [...]>, or C<error>.
+C<$result> will be one of C<pass>, C<fail>, C<neutral [...]>, or C<error>.
 See C<result()> above for meanings.
 
 =cut
@@ -508,10 +548,13 @@ plus a few others.  The default set of directives is
 
   "a/24 mx/24 ptr"
 
-That default set will return either "pass" or "unknown".
+That default set will return either "pass" or "neutral".
 
 If you want to experiment with a different default, you can
 pass it as an argument: C<< $query->best_guess("a mx ptr") >>
+
+Note that this method is deprecated. You should set C<guess=E<gt>1>
+on the C<new> method instead.
 
 =item C<< $query->trusted_forwarder() >>
 
@@ -529,7 +572,11 @@ legitimate envelope sender forgery.
 
   "include:spf.trusted-forwarder.org"
 
-This will return either "pass" or "unknown".
+This will return either "pass" or "neutral".
+
+Note that this method is deprecated. You should set C<trusted=E<gt>1>
+on the C<new> method instead.
+
 
 =cut
 
@@ -555,7 +602,7 @@ sub top {
   return $query;
 }
 
-sub set_error {
+sub set_temperror {
   my $query = shift;
   $query->{error} = shift;
 }
@@ -594,7 +641,7 @@ sub best_guess {
     return $result;
   }
 
-  return $query->sanitize("unknown");
+  return $query->sanitize("neutral");
 }
 
 sub trusted_forwarder {
@@ -695,7 +742,7 @@ sub spfquery {
 
   $query->top->{lookup_count}++;
 
-  if ($query->is_looping)            { return "UNKNOWN", $query->{spf_error_explanation}, $query->is_looping }
+  if ($query->is_looping)            { return "unknown", $query->{spf_error_explanation}, $query->is_looping }
   if ($query->can_use_cached_result) { return $query->cached_result; }
   else                               { $query->tell_cache_that_lookup_is_underway; }
 
@@ -705,9 +752,12 @@ sub spfquery {
     $query->debuglog("no SPF record found for $query->{domain}");
     $query->delete_cache_point;
     if ($query->{domain} ne $query->{orig_domain}) {
-        return "UNKNOWN", $query->{spf_error_explanation}, "Missing SPF record at $query->{domain}";
+        if ($query->{error}) {
+            return "error", $query->{spf_error_explanation}, $query->{error};
+        }
+        return "unknown", $query->{spf_error_explanation}, "Missing SPF record at $query->{domain}";
     }
-    return "unknown", "SPF", "domain of sender $query->{sender} does not designate mailers";
+    return "none", "SPF", "domain of sender $query->{sender} does not designate mailers";
   }
 
   if ($directive_set->{hard_syntax_error}) {
@@ -722,16 +772,15 @@ sub spfquery {
     my ($result, $comment) = $query->evaluate_mechanism($mechanism);
 
     if ($query->{error}) {
-      $query->debuglog("  returning fatal error: $query->{error}");
+      $query->debuglog("  returning temporary error: $query->{error}");
       $query->delete_cache_point;
       return "error", $query->{spf_error_explanation}, $query->{error};
     }
 
-    next if not defined $result;
-    if ($result and $result !~ /^unknown/) {
+    if (defined $result) {
       $query->debuglog("  saving result $result to cache point and returning.");
       my $explanation = $query->interpolate_explanation(
-            $result eq "error" or $result =~ /^UNKNOWN/
+            ($result =~ /^unknown/)
             ? $query->{spf_error_explanation} : $query->{default_explanation});
       $query->save_result_to_cache($result, $explanation, $comment);
       return $result, $explanation, $comment;
@@ -760,9 +809,9 @@ sub spfquery {
     return @inner_result;
   }
 
-  $query->debuglog("  mechanisms returned unknown; deleting cache point and using unknown");
+  $query->debuglog("  no mechanisms matched; deleting cache point and using neutral");
   $query->delete_cache_point;
-  return "unknown", $query->interpolate_explanation($query->{default_explanation}), $directive_set->{soft_syntax_error};
+  return "neutral", $query->interpolate_explanation($query->{default_explanation}), $directive_set->{soft_syntax_error};
 }
 
 # ----------------------------------------------------------
@@ -811,7 +860,7 @@ sub can_use_cached_result {
     $query->debuglog("  lookup: we have already processed $query->{domain} before with $query->{ipv4}.");
     my @cached = @{ $Domains_Queried->{$cache_point} };
     if (not defined $CACHE_TIMEOUT
-	or time - $cached[2] > $CACHE_TIMEOUT) {
+	or time - $cached[3] > $CACHE_TIMEOUT) {
       $query->debuglog("  lookup: but its cache entry is stale; deleting it.");
       delete $Domains_Queried->{$cache_point};
       return 0;
@@ -832,10 +881,10 @@ sub tell_cache_that_lookup_is_underway {
 
 sub save_result_to_cache {
   my $query = shift;
-  my ($result, $comment) = (shift, shift);
+  my ($result, $explanation, $comment) = (shift, shift, shift);
 
   # define an entry here so we don't loop endlessly in an Include loop.
-  $Domains_Queried->{$query->cache_point} = [$result, $comment, time];
+  $Domains_Queried->{$query->cache_point} = [$result, $explanation, $comment, time];
 }
 
 sub cached_result {
@@ -987,12 +1036,12 @@ sub evaluate_mechanism {
 				       $mechanism,
 				       ($argument ? ":" : ""),
 				       $argument);
-    my $unknown_string = "UNKNOWN $unrecognized_mechanism";
-    $query->debuglog("  evaluate_mechanism: unrecognized mechanism $unrecognized_mechanism, returning $unknown_string");
-    return $unknown_string => "unrecognized mechanism $unrecognized_mechanism";
+    my $error_string = "unknown $unrecognized_mechanism";
+    $query->debuglog("  evaluate_mechanism: unrecognized mechanism $unrecognized_mechanism, returning $error_string");
+    return $error_string => "unrecognized mechanism $unrecognized_mechanism";
   }
 
-  return ("unknown", "evaluate-mechanism: unknown");
+  return ("neutral", "evaluate-mechanism: neutral");
 }
 
 # ----------------------------------------------------------
@@ -1032,8 +1081,8 @@ sub myquery {
     }
 
     $query->debuglog("  myquery: $label $qtype lookup error: $errorstring");
-    $query->debuglog("  myquery: will set top-level error condition.");
-    $query->top->set_error("DNS error while looking up $label $qtype: $errorstring");
+    $query->debuglog("  myquery: will set error condition.");
+    $query->set_temperror("DNS error while looking up $label $qtype: $errorstring");
     return;
   }
 
@@ -1061,14 +1110,10 @@ sub myquery {
 # undef
 #       mechanism did not match
 #
-# error
-#       some error happened during processing
 # unknown
-#       no spf record found
-# UNKNOWN
-#       explicit unknown
-# UNKNOWN error message
 #       some error happened during processing
+# error
+#       some temporary error
 #
 # ----------------------------------------------------------
 # 			    all
@@ -1098,17 +1143,21 @@ sub mech_include {
 				  depth  => $query->{depth} + 1,
 				  reason => "includes $argument",
                                   local => undef,
+                                  trusted => undef,
                                   guess => undef,
+                                  default_record => undef,
 				 );
 
   my ($result, $explanation, $text, $time) = $inner_query->spfquery();
 
   $query->debuglog("  mechanism include: got back result $result / $text / $time");
 
-  if ($result eq "pass")     { return hit     => $text, $time; }
-  if ($result eq "error")    { return error   => $text, $time; }
-  if ($result eq "unknown")  { return undef, $text, $time;     }
-  if ($result =~ /^UNKNOWN/) { return $result => $text, $time; }
+  if ($result eq "pass")            { return hit     => $text, $time; }
+  if ($result eq "error")           { return $result => $text, $time; }
+  if ($result eq "unknown")         { return $result => $text, $time; }
+  if ($result eq "fail" ||
+      $result eq "neutral" ||
+      $result eq "softfail")        { return undef,     $text, $time; }
   
   $query->debuglog("  mechanism include: reducing result $result to unknown");
   return "unknown", $text, $time;
@@ -1197,7 +1246,7 @@ sub mech_ptr {
   my $query = shift;
   my $argument = shift;
 
-  if ($query->{ipv6}) { return "unknown", "ipv6 not yet supported"; }
+  if ($query->{ipv6}) { return "neutral", "ipv6 not yet supported"; }
 
   my $domain_to_use = $argument || $query->{domain};
 
@@ -1245,6 +1294,10 @@ sub mech_exists {
   foreach ($query->myquery($domain_to_use, "A", "address")) {
     $query->debuglog("  mechanism exists: $_");
     $query->debuglog("  mechanism exists: we have a match.");
+    my @txt = map { s/^"//; s/"$//; $_ } $query->myquery($domain_to_use, "TXT", "txtdata");
+    if (@txt) {
+        return hit => join(" ", @txt);
+    }
     return hit => "$domain_to_use found";
   }
   return;
@@ -1307,8 +1360,8 @@ sub shorthand2value {
   my $shorthand = shift;
   return { "-" => "fail",
 	   "+" => "pass",
-	   "~" => "UNKNOWN",
-	   "?" => "UNKNOWN" } -> {$shorthand} || $shorthand;
+	   "~" => "softfail",
+	   "?" => "neutral" } -> {$shorthand} || $shorthand;
 }
 
 sub value2shorthand {
@@ -1320,7 +1373,8 @@ sub value2shorthand {
 	   "deny"     => "-",
 	   "allow"    => "+",
 	   "softdeny" => "~",
-	   "unknown"  => "?" } -> {$value} || $value;
+	   "unknown"  => "?",
+	   "neutral"  => "?" } -> {$value} || $value;
 }
 
 sub interpolate_explanation {
@@ -1360,6 +1414,8 @@ sub interpolate_explanation {
       $query->debuglog("  DirectiveSet->new(): doing TXT query on $current_domain");
       my @txt = $query->myquery($current_domain, "TXT", "txtdata");
 
+      return if ($query->{error});
+
       # squish multiline responses into one first.
 
       foreach (@txt) {
@@ -1367,12 +1423,12 @@ sub interpolate_explanation {
 	s/^\s+//;
 	s/\s+$//;
 	
-	if (/^v=spf1(\s.*)/i) {
+	if (/^v=spf1(\s.*|)$/i) {
 	  $txt .= $1;
 	}
       }
 
-      if (!$txt && $default_record) {
+      if (!defined $txt && $default_record) {
           $txt = "v=spf1 $default_record ?all";
           $query->{spf_source} = "local policy";
       }
@@ -1380,7 +1436,7 @@ sub interpolate_explanation {
 
     $query->debuglog("  DirectiveSet->new(): SPF policy: $txt");
 
-    return if not $txt;
+    return if not defined $txt;
 
     my $directive_set = bless { orig_txt => "v=spf1$txt", txt => $txt } , $class;
 
@@ -1416,7 +1472,6 @@ sub interpolate_explanation {
 	if (my ($prefix, $lhs, $rhs) = $word =~ /^([-~+?]?)([\w_-]+)([\/:]\S*)?$/i) {
 	  $rhs =~ s/^://;
 	  $prefix ||= "+";
-	  $prefix = "?" if $prefix eq "~"; # softfail is deprecated, has become "unknown"
 	  $query->debuglog("  lookup:   TXT prefix=$prefix, lhs=$lhs, rhs=$rhs");
 	  push @{$directive_set->{mechanisms}}, [$prefix => lc $lhs => $rhs];
 	  next;
