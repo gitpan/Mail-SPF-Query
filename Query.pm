@@ -5,7 +5,7 @@ package Mail::SPF::Query;
 #
 # 		       Meng Weng Wong
 #		  <mengwong+spf@pobox.com>
-# $Id: Query.pm,v 1.15 2003/11/28 23:20:11 devel Exp $
+# $Id: Query.pm,v 1.16 2003/11/29 02:14:28 devel Exp $
 # test an IP / sender address pair for pass/fail/nodata/error
 #
 # http://spf.pobox.com/
@@ -37,7 +37,7 @@ my @KNOWN_MECHANISMS = qw( a mx ptr include ip4 ip6 exists all );
 
 my $Domains_Queried = {};
 
-$VERSION = "1.8";
+$VERSION = "1.8.1";
 
 $CACHE_TIMEOUT = 120;
 
@@ -56,7 +56,7 @@ Mail::SPF::Query - query Sender Permitted From for an IP,email,helo
 
   my $query = new Mail::SPF::Query (ip => "127.0.0.1", sender=>'foo@example.com', helo=>"somehost.example.com");
   my ($result, $smtp_comment, $header_comment) = $query->result();
-  my ($guess,  $smtp_comment, $header_comment) = $query->best_guess();
+  my ($guess,  $smtp_guess,   $header_guess)   = $query->best_guess();
 
   if    ($result eq "pass")     { ... } # domain is not forged
   elsif ($result eq "fail")     { ... } # domain is forged
@@ -1124,18 +1124,9 @@ http://spf.pobox.com/
 	    last;
 	  }
 
-	  if ($lhs eq "default") {
-	    if ($rhs =~ /^(unknown|deny|softdeny|allow)$/i) {
-	      push @{$directive_set->{mechanisms}}, [ $query->value2shorthand($rhs), all => undef ];
-	    }
-	    else {
-	      # ignore unknown modifiers.
-	      $directive_set->{soft_syntax_error} = "spf error: \"$lhs=$rhs\" not understood";
-	    }
-	  }
-
 	  if ($lhs eq "exp")      { $directive_set->{exp}      = $rhs; }
 	  if ($lhs eq "redirect") { $directive_set->{redirect} = $rhs; }
+	  if ($lhs eq "default")  { $directive_set->{default}  = $rhs; }
 
 	  next;
 	}
@@ -1148,6 +1139,10 @@ http://spf.pobox.com/
 	  push @{$directive_set->{modifiers}}, [lc $lhs => $rhs];
 	  next;
 	}
+      }
+
+      if (my $rhs = delete $directive_set->{default}) {
+	push @{$directive_set->{mechanisms}}, [ $query->value2shorthand($rhs), all => undef ];
       }
 
       $directive_set->{mechanisms} = []           if not $directive_set->{mechanisms};
