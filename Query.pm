@@ -33,9 +33,6 @@ use URI::Escape;
 use Net::CIDR::Lite;
 use Net::DNS qw(); # by default it exports mx, which we define.
 
-use Sys::Hostname;
-eval { require Sys::Hostname::Long }; my $HOSTNAME = $@ ? hostname() : Sys::Hostname::Long::hostname_long();
-
 # ----------------------------------------------------------
 # 		       initialization
 # ----------------------------------------------------------
@@ -48,7 +45,7 @@ my $MAX_RECURSION_DEPTH = 10;
 
 my $Domains_Queried = {};
 
-$VERSION = "1.9.6";
+$VERSION = "1.10";
 
 $CACHE_TIMEOUT = 120;
 
@@ -100,6 +97,7 @@ of an SMTP client IP.
      guess_mechs => "a/24 mx/24 ptr exists:%{p}.wl.trusted-forwarder.org",
      debug => 1, debuglog => sub { print STDERR "@_\n" },
      max_recursion_depth => 10,
+     myhostname => "foo.example.com", # prepended to header_comment
 
   if ($@) { warn "bad input to Mail::SPF::Query: $@" }
 
@@ -155,6 +153,13 @@ sub new {
   $query->{Reversed_IP} = ($query->{ipv4} ? reverse_in_addr($query->{ipv4}) :
 			   $query->{ipv6} ? die "IPv6 not supported" : "");
 
+  if (not $query->{myhostname}) {
+    eval { require Sys::Hostname; require Sys::Hostname::Long };
+    $query->{myhostname} = $@ ? hostname() : Sys::Hostname::Long::hostname_long();
+  }
+
+  $query->{myhostname} ||= "localhost";
+
   $query->post_new(@_) if $class->can("post_new");
 
   return $query;
@@ -203,7 +208,7 @@ sub result {
   # print STDERR "*** result = $result\n";
 
   if ($result eq "fail") {
-    my $receiver = uri_escape($HOSTNAME);
+    my $receiver = uri_escape($query->{myhostname});
     my $why_url = $query->macro_substitute("http://spf.pobox.com/why.html?sender=%{S}&ip=%{I}&receiver=$receiver");
     $smtp_comment ||= "please see $why_url";
   }
@@ -212,7 +217,7 @@ sub result {
 
   return (lc $result,
 	  $smtp_comment,
-	  "$HOSTNAME: ". $query->header_comment($result)) if wantarray;
+	  "$query->{myhostname}: ". $query->header_comment($result)) if wantarray;
 
   return  lc $result;
 }

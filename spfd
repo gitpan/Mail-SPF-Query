@@ -1,5 +1,10 @@
 #!/icg/bin/perl -sw
 
+# you probably want to change the above line to /usr/bin/perl
+
+eval 'exec /usr/local/bin/perl -sw -S $0 ${1+"$@"}'
+    if 0; # not running under some shell
+
 # simple forking daemon to provide SPF services
 # mengwong+spf@pobox.com
 # Tue Oct 28 00:46:44 EST 2003
@@ -8,18 +13,20 @@
 #
 # or use Mail::Postfix::Attr to query spfd over a unix domain socket.
 #
-# ./spfd -port=5970                  # inet socket
-# ./spfd -path=/var/spfd             # unix domain socket
-#
+# ./spfd -port=5970		# inet socket
+# ./spfd -path=/var/spfd	# unix domain socket
+# [-user=(uid|username)]	#setuid user for process if using inet socket
+#				# or chown if using unix-socket 	
+# [-group=(gid|groupname)]	# as above, but with group
 
 use Mail::SPF::Query;
 use Socket;
 
 use strict;
-use vars qw($port $path);
+use vars qw($port $path $group $user);
 
 sub usage () {
-  print "usage: spfd ( -port=5970 | -path=/var/spfd )\n";
+  print "usage: spfd ( -port=5970 | -path=/var/spfd ) [-user=(uid|username)] [-group=(gid|groupname)]\n";
   print "usage: spfd assuming -port=5970\n";
 }
 
@@ -33,6 +40,28 @@ if (not $port and not $path) {
 if ($port and $path) {
   usage;
   exit 1;
+}
+
+if ($group =~ /\D/) {
+  $group = getgrnam($group) || die "Group: $group not found\n";
+}
+
+if ($port and $group) {
+  $( = $) = $group;
+  unless ($( == $) and $( == $group) {
+    die( "setgid($group) call failed: $!\n" );
+  }
+}
+
+if ($user =~ /\D/) {
+  $user = getpwnam($user) || die "User: $user not found\n"; 
+}
+
+if ($port and $user) {
+   $< = $> = $user;
+   unless ($< == $> and $< == $user) {
+    die( "setuid($user) call failed: $!\n" );
+  }
 }
 
 $|++;
@@ -62,7 +91,16 @@ if ($port) {
 print "$$: creating server with args @args\n";
 
 my $server = $sock_type eq "inet" ? IO::Socket::INET->new(@args) : IO::Socket::UNIX->new(@args);
+if ($path) {
+	if ($group and $user) {
+		chown $user, $group, $path or die "Cannot chown $user, $group on $path -- $!";
 
+	} elsif ($user) {
+		chown $user, -1, $path or die "Cannot chown $user on $path -- $!";
+	}
+	# fixup perms so that our user/group can read/write to the unix socket
+	chmod 0660, $path or die "Cannot fixup perms on $path -- $!";
+}
 DEBUG and print "$$: server is $server\n";
 
 while (my $sock = $server->accept()) {
@@ -122,3 +160,4 @@ while (my $sock = $server->accept()) {
 
   exit;
 }
+
