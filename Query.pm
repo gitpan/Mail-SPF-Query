@@ -5,7 +5,7 @@ package Mail::SPF::Query;
 #
 # 		       Meng Weng Wong
 #		  <mengwong+spf@pobox.com>
-# $Id: Query.pm,v 1.38 2004/02/26 04:18:08 devel Exp $
+# $Id: Query.pm,v 1.40 2004/02/26 22:55:32 devel Exp $
 # test an IP / sender address pair for pass/fail/nodata/error
 #
 # http://spf.pobox.com/
@@ -45,7 +45,6 @@ package Mail::SPF::Query;
 #    right now only the first appears.
 # 
 #  mengwong 20040225: override and fallback keys need to be lc'ed at start
-#  mengwong 20040225: inputs to cidr need to be sanity checked.
 # 
 # ----------------------------------------------------------
 
@@ -78,7 +77,7 @@ my $Domains_Queried = {};
 # if not set, then softfail is treated as neutral.
 my $softfail_supported = 1;
 
-$VERSION = "1.993";
+$VERSION = "1.994";
 
 $CACHE_TIMEOUT = 120;
 
@@ -1366,7 +1365,20 @@ sub mech_ip4 {
 
   return if not length $cidr_spec;
 
-  my $cidr = Net::CIDR::Lite->new($cidr_spec); # TODO: sanity check input, make this work for ipv6 as well
+  my ($network, $cidr_length) = split (/\//, $cidr_spec, 2);
+
+  my $dot_count = $network =~ tr/././;
+  
+  # turn "1.2.3/24" into "1.2.3.0/24"
+  for (1 .. (3 - $dot_count)) { $network .= ".0"; }
+
+  # TODO: add library compatibility test for ill-formed ip4 syntax
+  if ($network !~ /^\d+\.\d+\.\d+\.\d+$/) { return ("unknown" => "bad argument to ip4: $cidr_spec"); }
+  
+  $cidr_length = "32" if not defined $cidr_length;
+
+  my $cidr = eval { Net::CIDR::Lite->new("$network/$cidr_length") }; # TODO: make this work for ipv6 as well
+  if ($@) { return ("unknown" => "unable to parse ip4:$cidr_spec"); }
 
   $query->debuglog("  mechanism ip4: looking for $query->{ipv4} in $cidr_spec");
 
@@ -1569,10 +1581,7 @@ sub try_fallback {
 	}
       }
 
-      return if not @txt;
-
       # squish multiline responses into one first.
-
       foreach (@txt) {
 	s/^"(.*)"$/$1/;
 	s/^\s+//;
