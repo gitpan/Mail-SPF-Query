@@ -5,7 +5,7 @@
 #########################
 
 use Test;
-BEGIN { plan tests => 6 };
+BEGIN { plan tests => 7 };
 use Mail::SPF::Query;
 
 # 1: did the library load okay?
@@ -14,22 +14,51 @@ ok(1);
 #########################
 
 # 2: test localhost shortcircuit always-pass
-ok(eval { new Mail::SPF::Query (ipv4 => "127.0.0.1", sender => "localhost.localdomain", fallbacks => [])->result },
+ok(eval { new Mail::SPF::Query (ipv4   => "127.0.0.1",
+				sender => "localhost.localdomain",
+				helo   => "localhost.localdomain",
+				fallbacks => [],
+			       )->result },
    "pass");
 
 # 3: mail-spf-test.mailzone.com provides a specific pass for 1.1.1.1
-ok(eval { new Mail::SPF::Query (ipv4 => "1.1.1.1", sender => "mail-spf-test.mailzone.com", fallbacks => [])->result },
+ok(eval { new Mail::SPF::Query (ipv4   => "1.1.1.1",
+				sender => "mail-spf-test.mailzone.com",
+				helo   => "localhost.localdomain",
+				fallbacks => [],
+			       )->result },
    "pass");
 
 # 4: mail-spf-test.mailzone.com provides a specific fail for 1.1.1.2
-ok(eval { new Mail::SPF::Query (ipv4 => "1.1.1.2", sender => "mail-spf-test.mailzone.com", fallbacks => [])->result },
+ok(eval { new Mail::SPF::Query (ipv4   => "1.1.1.2",
+				sender => "mail-spf-test.mailzone.com",
+				helo   => "localhost.localdomain",
+				fallbacks => [],
+			       )->result },
    "fail");
 
 # 5: unknown.mailzone.com does not exist.
-ok(eval { new Mail::SPF::Query (ipv4 => "1.1.1.3", sender => "unknown.mailzone.com", fallbacks => [])->result },
+ok(eval { new Mail::SPF::Query (ipv4   => "1.1.1.3",
+				sender => "unknown.mailzone.com",
+				helo   => "localhost.localdomain",
+				fallbacks => [],
+			       )->result },
    "unknown");
 
 # 6: test fallbacking.
-ok(eval { new Mail::SPF::Query (ipv4 => "1.2.3.4", sender => "mytest.tld", fallbacks => ["fallback.mail-spf-test.mailzone.com"])->result },
+ok(eval { new Mail::SPF::Query (ipv4   => "1.2.3.4",
+				sender => "mytest.tld",
+				helo   => "localhost.localdomain", 
+				fallbacks => ["fallback.mail-spf-test.mailzone.com"],
+			       )->result },
+   "pass");
+
+# 7: test use of HELO.
+# 3: mail-spf-test.mailzone.com provides a specific pass for 1.1.1.1
+ok(eval { new Mail::SPF::Query (ipv4   => "1.1.1.1",
+				sender => "",
+				helo   => "mail-spf-test.mailzone.com",
+				fallbacks => [],
+			       )->result },
    "pass");
 

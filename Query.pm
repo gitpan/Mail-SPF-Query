@@ -5,7 +5,7 @@ package Mail::SPF::Query;
 #
 # 		       Meng Weng Wong
 #		  <mengwong+spf@pobox.com>
-# $Id: Query.pm,v 1.4 2003/06/27 16:28:37 devel Exp $
+# $Id: Query.pm,v 1.6 2003/07/24 22:13:34 devel Exp $
 # test an IP / sender address pair for pass/fail/nodata/error
 #
 # license: opensource.
@@ -16,7 +16,7 @@ package Mail::SPF::Query;
 use 5.006;
 use strict;
 use warnings;
-use vars qw($VERSION);
+use vars qw($VERSION $CACHE_TIMEOUT);
 
 # ----------------------------------------------------------
 # 		       initialization
@@ -24,7 +24,9 @@ use vars qw($VERSION);
 
 my @FALLBACKS = qw(spf.mailzone.com);
 my %SEVERITY = (pass => 00, softfail => 05, fail => 10, error => 20, unknown => 50);
-($VERSION) = '$Id: Query.pm,v 1.4 2003/06/27 16:28:37 devel Exp $' =~ /([\d.]{3,})/;
+($VERSION) = '$Id: Query.pm,v 1.6 2003/07/24 22:13:34 devel Exp $' =~ /([\d.]{3,})/;
+
+$CACHE_TIMEOUT = 120;
 
 # ----------------------------------------------------------
 # 	 no user-serviceable parts below this line
@@ -37,11 +39,11 @@ my $looks_like_email = qr/\S+\@\S+/;
 
 =head1 NAME
 
-Mail::SPF::Query - query Sender Permitted From for an IP,email
+Mail::SPF::Query - query Sender Permitted From for an IP,email,helo
 
 =head1 SYNOPSIS
 
-  my $query = new Mail::SPF::Query (ip => "127.0.0.1", sender=>'foo@example.com');
+  my $query = new Mail::SPF::Query (ip => "127.0.0.1", sender=>'foo@example.com', helo=>"somehost.example.com");
   my ($result, $comment) = $query->result();
 
   if    ($result eq "pass")     { ... } # domain is not forged
@@ -56,30 +58,19 @@ whitelist of their designated outbound mailers.  Given an
 envelope sender, Mail::SPF::Query determines the legitimacy
 of an SMTP client IP.
 
+=head1 METHODS
+
 =head2 Mail::SPF::Query->new()
 
-  my $query = eval { new Mail::SPF::Query (ip => "127.0.0.1", sender=>'foo@example.com') };
+  my $query = eval { new Mail::SPF::Query (ip => "127.0.0.1", sender=>'foo@example.com', helo=>"host.example.com") };
 
                     optional parameters:   fallbacks => ["spf.mailzone.com", ...],
-                                           debug => 1,
+                                           debug => 1, debuglog => sub { print STDERR "@_\n" },
                                            no_explicit_wildcard_workaround => 1,
 
   if ($@) { warn "bad input to Mail::SPF::Query: $@" }
 
-Set C<debug=>1> to watch the queries happen.
-
-We expect an SPF-conformant nameserver to respond with an
-"spf=allow/deny/softdeny" response when we query
-C<reversed-ip.in-addr._smtp_client.domain>.  If we receive
-an NXDOMAIN response upon the initial query, we will try to
-find a default status by querying C<_default._smtp_client>.
-We do this because certain DNS servers require explicit
-wildcarding at each level of a subdomain hierarchy; this
-behaviour is RFC1034-conformant, but undesirable for our
-purposes!  Set C<no_explicit_wildcard_workaround=>1,
-fallbacks=>[]> if your nameserver needs explicit
-wildcarding.  If it does, see
-http://spf.pobox.com/explicit_wildcards.html
+Set C<debug=E<gt>1> to watch the queries happen.
 
 =cut
 
@@ -89,13 +80,27 @@ sub new {
   my $class = shift;
   my $query = bless { fallbacks=>\@FALLBACKS, @_ }, $class;
 
-  $query->{ipv4} = delete $query->{ip} if $query->{ip} and $query->{ip} =~ $looks_like_ipv4;
-  $query->debuglog("new: ipv4=$query->{ipv4}, sender=$query->{sender}");
+  $query->{ipv4} = delete $query->{ip}   if $query->{ip}   and $query->{ip} =~ $looks_like_ipv4;
+  $query->{helo} = delete $query->{ehlo} if $query->{ehlo};
+
+  $query->{sender} =~ s/<(.*)>/$1/g;
+
+  if (not $query->{helo}) { require Carp; import Carp qw(cluck); cluck ("Mail::SPF::Query: ->new() requires a \"helo\" argument.\n");
+			    $query->{helo} = "";
+			  }
+
+  $query->debuglog("new: ipv4=$query->{ipv4}, sender=$query->{sender}, helo=$query->{helo}");
 
   if (not ($query->{ipv4}   and length $query->{ipv4}))   { die "no IP address given to spfquery"   }
-  if (not ($query->{sender} and length $query->{sender})) { die "no sender email given to spfquery" }
 
   ($query->{domain}) = $query->{sender} =~ /([^@]+)$/; # given foo@bar@baz.com, the domain is baz.com, not bar@baz.com.
+
+  if (not $query->{domain}) {
+    $query->debuglog("spfquery: sender $query->{sender} has no domain, using HELO domain $query->{helo} instead.");
+    $query->{domain} = $query->{helo};
+    $query->{sender} = $query->{helo};
+  }
+
   if (not length $query->{domain}) { die "unable to identify domain of sender $query->{sender}" }
 
   $query->{Reversed_IP} = ($query->{ipv4} ? reverse_in_addr($query->{ipv4}) :
@@ -129,6 +134,10 @@ C<unknown> means the domain does not publish SPF data.
 C<error> means the DNS lookup encountered an error during
 processing.
 
+Results are cached internally for a default of 120 seconds.
+You can call C<-E<gt>result()> repeatedly; subsequent
+lookups won't hit your DNS.
+
 =cut
 
 # ----------------------------------------------------------
@@ -150,14 +159,20 @@ sub result {
 
 =head2 $query->debuglog()
 
-  Subclasses may override this with their own debug logger.  I recommend Log::Dispatch.
+  Subclasses may override this with their own debug logger.
+  I recommend Log::Dispatch.
+
+  Alternatively, pass the C<new()> constructor a
+  C<debuglog => sub { ... }> callback, and we'll pass
+  debugging lines to that.
 
 =cut
 
 sub debuglog {
   my $self = shift;
   return if ref $self and not $self->{debug};
-  printf STDERR "%s\n", join (" ", @_);
+  if (exists $self->{debuglog} and ref $self->{debuglog} eq "CODE") { eval { $self->{debuglog}->(@_) } ; }
+  else { printf STDERR "%s\n", join (" ", @_); }
 }
 
 # ----------------------------------------------------------
@@ -175,9 +190,9 @@ sub spfquery {
 
   my $query = pop @$search_stack;
 
-  my ($lookup_result, $lookup_text) = $self->lookup($query, $search_stack);
+  my ($lookup_result, $lookup_text, $lookup_time) = $self->lookup($query, $search_stack);
 
-  $self->{Domains_Queried}->{lc $query->{domain}} = [$lookup_result, $lookup_text];
+  $self->{Domains_Queried}->{lc $query->{domain}} = [$lookup_result, $lookup_text, $lookup_time];
 
   $self->debuglog("spfquery: $depth <-- result: $lookup_result");
 
@@ -188,14 +203,15 @@ sub spfquery {
 
   $self->debuglog("spfquery: $depth ->> recursing with $search_stack->[-1]->{domain} to depth " . ($depth+1));
 
-  my ($spfquery_result, $spfquery_text) = $self->spfquery($search_stack, $depth+1);
+  my ($spfquery_result, $spfquery_text, $spfquery_time) = $self->spfquery($search_stack, $depth+1);
 
   $self->debuglog("spfquery: $depth -<< recursion complete, now comparing $lookup_result with $spfquery_result");
   
-  my @sorted_by_severity = sort by_severity my @to_sort = ([$lookup_result, $lookup_text], [$spfquery_result, $spfquery_text]);
-  my ($result, $text) = @{$sorted_by_severity[0]};
+  my @sorted_by_severity = sort by_severity my @to_sort = ([  $lookup_result,   $lookup_text,   $lookup_time],
+							   [$spfquery_result, $spfquery_text, $spfquery_time]);
+  my ($result, $text, $time) = @{$sorted_by_severity[0]};
 
-  $self->{Domains_Queried}->{lc $query->{domain}} = [$result, $text];
+  $self->{Domains_Queried}->{lc $query->{domain}} = [$result, $text, $time];
 
   return $result, $text;
 }
@@ -209,10 +225,20 @@ sub lookup {
   my %query = %{shift()};  my $domain = $query{domain};
   my $search_stack = shift;
 
-  if ($self->{ipv4} =~ /^127\./) { return "pass", "localhost is always allowed." }
+  if ($self->{ipv4} =~ /^127\./) { return "pass", "localhost is always allowed.", time }
   
-  if ($self->{Domains_Queried}->{lc $domain}) { $self->debuglog("  lookup: we have already processed $domain before.  returning its result.");
-						return @{ $self->{Domains_Queried}->{lc $domain} }; }
+  if ($self->{Domains_Queried}->{lc $domain}) { $self->debuglog("  lookup: we have already processed $domain before.");
+						my @cached = @{ $self->{Domains_Queried}->{lc $domain} };
+						if (not defined $CACHE_TIMEOUT
+						    or time - $cached[2] > $CACHE_TIMEOUT) {
+						  $self->debuglog("  lookup: but its cache entry is stale; deleting it.");
+						  delete $self->{Domains_Queried}->{lc $domain};
+						}
+						else {
+						  $self->debuglog("  lookup: the cache entry is fresh; returning it.");
+						  return @cached;
+						}
+					      }
 
   my $querystring = "$self->{Reversed_IP}._smtp_client.$domain";
   my $resquery = $self->resolver->query($querystring, "TXT");
@@ -242,7 +268,7 @@ sub lookup {
     if (my ($cname) = grep { $_->type eq "CNAME" } $resquery->answer) {
       $self->debuglog("  lookup:    C  will use " . $cname->cname . " instead of $domain");
       push @$search_stack, { %query, domain => $cname->cname, fallback=>undef };
-      return "unknown", "canonicalized to " . $cname->cname;
+      return "unknown", "canonicalized to " . $cname->cname, time;
     }
 
     for my $txt (grep { $_->type eq "TXT" } $resquery->answer) {
@@ -252,6 +278,7 @@ sub lookup {
 	  return @toreturn = ("pass",
 			      ("client " . $self->hostnamed_string($query{ipv4}) . " is designated mailer for domain of sender $query{sender}" .
 			       ($query{fallback} ? " according to $query{fallback}" : "")),
+			      time,
 			      );
 	}
 	
@@ -265,6 +292,7 @@ sub lookup {
 	  @toreturn = ($passfail,
 		       ("client " . $self->hostnamed_string($query{ipv4}) . " is not a designated mailer for transitioning domain of sender $query{sender}" .
 			($query{fallback} ? " according to $query{fallback}" : "")),
+		       time,
 		       );
 	}
 	
@@ -273,6 +301,7 @@ sub lookup {
 	  @toreturn = ($passfail,
 		       ("client " . $self->hostnamed_string($query{ipv4}) . " is not a designated mailer for domain of sender $query{sender}" .
 			($query{fallback} ? " according to $query{fallback}" : "")),
+		       time,
 		       );
 	}
 
@@ -281,6 +310,7 @@ sub lookup {
 	  return @toreturn = ($passfail,
 			      ("domain of sender $query{sender} explicitly declines to participate in SPF" .
 			       ($query{fallback} ? " according to $query{fallback}" : "")),
+			      time,
 			      );
 	}
       }
@@ -294,7 +324,7 @@ sub lookup {
 
     return @toreturn if @toreturn;
     
-    return "unknown", "no data received for $query{domain}";
+    return "unknown", "no data received for $query{domain}", time;
   }
 
   $self->debuglog("  lookup:     X query failed: ", $self->resolver->errorstring);
@@ -309,7 +339,9 @@ sub lookup {
   }
 
   return ("unknown", "domain of sender $query{sender} does not designate mailers: " . $self->resolver->errorstring .
-	  ($query{fallback} ? " according to $query{fallback}" : ""));
+	  ($query{fallback} ? " according to $query{fallback}" : ""),
+	  time,
+	 );
 
 }
 
@@ -362,6 +394,19 @@ sub fallbacks {
 # ----------------------------------------------------------
 # 		      algo
 # ----------------------------------------------------------
+
+=head1 Regarding Explicit Wildcards
+
+We expect an SPF-conformant nameserver to respond with an
+"spf=allow/deny/softdeny" response when we query
+C<reversed-ip.in-addr._smtp_client.host.example.com> and
+C<reversed-ip.in-addr._smtp_client.example.com>.  If we
+receive an NXDOMAIN response upon the initial query, we will
+try to find a default status by querying
+C<_default._smtp_client>.  This behaviour will be removed in
+future releases.  See
+http://spf.pobox.com/explicit_wildcards.html for more
+information.
 
 =head1 Algorithm
 
@@ -447,6 +492,10 @@ Meng Weng Wong, <mengwong+spf@pobox.com>
 =head1 SEE ALSO
 
 http://spf.pobox.com/
+
+http://develooper.com/code/qpsmtpd/ is a Perl replacement
+for qmail-smtpd.  It also works as a Postfix content-filter
+and smtpd proxy pass-through.  qpsmtpd supports SPF.
 
 =cut
 
