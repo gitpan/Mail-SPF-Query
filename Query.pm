@@ -5,7 +5,7 @@ package Mail::SPF::Query;
 #
 # 		       Meng Weng Wong
 #		  <mengwong+spf@pobox.com>
-# $Id: Query.pm,v 1.19 2003/11/29 21:38:39 devel Exp $
+# $Id: Query.pm,v 1.20 2003/11/30 08:57:59 devel Exp $
 # test an IP / sender address pair for pass/fail/nodata/error
 #
 # http://spf.pobox.com/
@@ -31,7 +31,7 @@ use Net::DNS qw(); # by default it exports mx, which we define.
 # 		       initialization
 # ----------------------------------------------------------
 
-my $GUESS_MECHS = "a/24 mx/24 ptr exists:%{d}.wl.trusted-forwarder.org exists:%{ir}.wl.trusted-forwarder.org";
+my $GUESS_MECHS = "a/24 mx/24 ptr exists:%{p}.wl.trusted-forwarder.org exists:%{ir}.wl.trusted-forwarder.org";
 
 my @KNOWN_MECHANISMS = qw( a mx ptr include ip4 ip6 exists all );
 
@@ -39,7 +39,7 @@ my $MAX_RECURSION_DEPTH = 10;
 
 my $Domains_Queried = {};
 
-$VERSION = "1.9";
+$VERSION = "1.9.1";
 
 $CACHE_TIMEOUT = 120;
 
@@ -69,7 +69,9 @@ Mail::SPF::Query - query Sender Permitted From for an IP,email,helo
     else                        { ... } #
   }
 
-  The default $guess_mechs is "a/24 mx/24 ptr exists:%{d}.wl.trusted-forwarder.org".
+  The default $guess_mechs is "a/24 mx/24 ptr
+         exists:%{p}.wl.trusted-forwarder.org
+         exists:%{ir}.wl.trusted-forwarder.org".
 
 =head1 ABSTRACT
 
@@ -87,7 +89,7 @@ of an SMTP client IP.
                                            helo  =>"host.example.com") };
 
   optional parameters:
-     guess_mechs => "a/24 mx/24 ptr exists:%{d}.wl.trusted-forwarder.org",
+     guess_mechs => "a/24 mx/24 ptr exists:%{p}.wl.trusted-forwarder.org",
      debug => 1, debuglog => sub { print STDERR "@_\n" },
      max_recursion_depth => 10,
 
@@ -148,7 +150,7 @@ sub new {
 
 =head2 $query->result()
 
-  my ($result, $comment) = $query->result();
+  my ($result, $smtp_comment, $header_comment) = $query->result();
 
 C<$result> will be one of C<pass>, C<fail>, C<softfail>, C<unknown>, or C<error>.
 
@@ -173,6 +175,10 @@ during processing.
 Results are cached internally for a default of 120 seconds.
 You can call C<-E<gt>result()> repeatedly; subsequent
 lookups won't hit your DNS.
+
+The smtp_comment should be displayed to the SMTP client.
+
+The header_comment goes into a Received-SPF header.
 
 =cut
 
@@ -221,7 +227,7 @@ produce an educated guess anyway.
 It pretends the domain defined A, MX, and PTR mechanisms,
 plus a few others.  The default set of directives is
 
-  "a/24 mx/24 ptr exists:%{d}.wl.trusted-forwarder.org"
+  "a/24 mx/24 pt rexists:%{p}.wl.trusted-forwarder.org exists:%{ir}.wl.trusted-forwarder.org"
 
 That default set will return either "pass" or "unknown".
 
