@@ -4,7 +4,7 @@ use ExtUtils::MakeMaker;
 WriteMakefile(
     'NAME'		=> 'Mail::SPF::Query',
     'VERSION_FROM'	=> 'Query.pm', # finds $VERSION
-    'PREREQ_PM'		=> { Net::DNS => 0.33,
+    'PREREQ_PM'		=> { Net::DNS => 0.46,
                              Net::CIDR::Lite => 0.15,
 			     Sys::Hostname::Long => 1.0,
                              URI => 1.00,

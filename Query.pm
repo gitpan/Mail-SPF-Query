@@ -5,7 +5,7 @@ package Mail::SPF::Query;
 #
 # 		       Meng Weng Wong
 #		  <mengwong+spf@pobox.com>
-# $Id: Query.pm,v 1.40 2004/02/26 22:55:32 devel Exp $
+# $Id: Query.pm,v 1.41 2004/02/27 03:00:57 devel Exp $
 # test an IP / sender address pair for pass/fail/nodata/error
 #
 # http://spf.pobox.com/
@@ -13,6 +13,7 @@ package Mail::SPF::Query;
 # this version is compatible with spf-draft-20040209.txt
 #
 # license: Academic Free License
+#          modulo issues relating to Microsoft Caller-ID For Email
 #
 # The result of evaluating a SPF record associated with a domain is one of:
 # 
@@ -77,7 +78,7 @@ my $Domains_Queried = {};
 # if not set, then softfail is treated as neutral.
 my $softfail_supported = 1;
 
-$VERSION = "1.994";
+$VERSION = "1.996";
 
 $CACHE_TIMEOUT = 120;
 
@@ -167,6 +168,9 @@ the following command:
                    "*.foo.com" => { record => "v=spf1 a mx -all", OPTION => VAULE }, },
      override => {   "bar.com" => { record => "v=spf1 a mx -all", OPTION => VALUE },
                    "*.bar.com" => { record => "v=spf1 a mx -all", OPTION => VAULE }, },
+     callerid => {   "hotmail.com" => { check => 1 },
+                   "*.hotmail.com" => { check => 1 },
+                   "*."            => { check => 0 }, },
 
   if ($@) { warn "bad input to Mail::SPF::Query: $@" }
 
@@ -198,7 +202,27 @@ Set C<fallback> to define "pretend" SPF records for domains
 that don't publish them yet.  Wildcards are supported.
 
 Set C<override> to define SPF records for domains that do
-publish but which you want to override anyway.
+publish but which you want to override anyway.  Wildcards
+are supported.
+
+Set C<callerid> to look for Microsoft "Caller-ID for Email"
+records if an SPF record is not found.  Wildcards are
+supported.  You will need Expat, XML::Parser, and
+LMAP::CID2SPF installed for this to work; if you do not have
+these libraries installed, the lookup will not occur.  By
+default, this library will only look for those records in
+hotmail.com and microsoft.com domains.
+
+If you want to always look for Caller-ID records, set
+
+  ->new(..., callerid => { "*." => { check => 1 } })
+
+If you never want to do Caller-ID,
+
+  ->new(..., callerid => { "*." => { check => 0 } })
+
+NOTE: domain name arguments to fallback, override, and
+callerid need to be in all lowercase.
 
 =cut
 
@@ -273,6 +297,14 @@ sub new {
   }
 
   $query->{myhostname} ||= "localhost";
+
+  $query->{callerid} ||= 
+    {     "hotmail.com" => { check => 1 }, # by default, check microsoft and hotmail domains
+	"*.hotmail.com" => { check => 1 }, # for caller-id records when no SPF record is found.
+	"microsoft.com" => { check => 1 },
+      "*.microsoft.com" => { check => 1 },
+	           "*." => { check => 0 }, # by default, do not check any other domains
+    };
 
   $query->post_new(@_) if $class->can("post_new");
 
@@ -1456,8 +1488,10 @@ sub interpolate_explanation {
 
 sub find_ancestor {
   my $query = shift;
-  my $current_domain = shift;
   my $which_hash = shift;
+  my $current_domain = shift;
+
+  return if not exists $query->{$which_hash};
 
   $current_domain =~ s/\.$//g;
   my @current_domain = split /\./, $current_domain;
@@ -1470,29 +1504,45 @@ sub find_ancestor {
     for my $match ($ancestor_level > 0 ? "*.$ancestor" : $ancestor) {
       $query->debuglog("  DirectiveSet $which_hash: is $match in the $which_hash hash?");
       if (my $found = $query->{$which_hash}->{lc $match}) {
-	$query->debuglog("  DirectiveSet override: yes, it is; the record is $found->{record}.");
-	my $txt = $found->{record};
-	$query->{spf_source} = "explicit $which_hash found: $match defines $txt";
-	$txt = "v=spf1 $txt" if $txt !~ /^v=spf1\b/i;
-	return $txt;
+	$query->debuglog("  DirectiveSet $which_hash: yes, it is.");
+	return wantarray ? ($which_hash, $match, $found) : $found;
       }
     }
   }
   return;
 }
 
+sub found_record_for {
+  my $query = shift;
+  my ($which_hash, $matched_domain_glob, $found) = $query->find_ancestor(@_);
+  return if not $found;
+  my $txt = $found->{record};
+  $query->{spf_source} = "explicit $which_hash found: $matched_domain_glob defines $txt";
+  $txt = "v=spf1 $txt" if $txt !~ /^v=spf1\b/i;
+  return $txt;
+}
+
 sub try_override {
   my $query = shift;
-  my $current_domain = shift;
-
-  return $query->find_ancestor($current_domain, "override");
+  return $query->found_record_for("override", @_);
 }
 
 sub try_fallback {
   my $query = shift;
-  my $current_domain = shift;
+  return $query->found_record_for("fallback", @_);
+}
 
-  return $query->find_ancestor($current_domain, "fallback");
+sub callerid_wanted_for {
+  my $query = shift;
+  my ($which_hash, $matched_domain_glob, $found) = $query->find_ancestor("callerid" => @_);
+
+  if (not $found) {
+    $query->debuglog("  callerid_wanted_for(@_) did not return a match in the callerid config hash.");
+    return;
+  }
+  my $check = $found->{check};
+  $query->debuglog("  callerid_wanted_for: callerid config defines check=$check for $matched_domain_glob");
+  return $check;
 }
 
 # ----------------------------------------------------------
@@ -1549,7 +1599,11 @@ sub try_fallback {
 	}
       }
 
-      if (not @txt) {
+      if (not @txt
+	  and
+	  $query->callerid_wanted_for($current_domain)
+	 ) {
+
 	eval { require LMAP::CID2SPF; };
 	if ($@) { 
 	  $query->debuglog("  DirectiveSet->new(): LMAP::CID2SPF not available, will not do Caller-ID lookup.");
@@ -1557,7 +1611,7 @@ sub try_fallback {
 	else {
 	  my @errors_before_ep = ($query->{error}, $query->{last_dns_error});
 	  my $ep_version = "_ep.$current_domain"; $ep_version =~ s/^_ep\._ep/_ep/i;
-	  $query->debuglog("  DirectiveSet->new(): doing TXT query on _ep.$current_domain");
+	  $query->debuglog("  DirectiveSet->new(): doing TXT query on $ep_version");
 	  my @eptxt = $query->myquery($ep_version, "TXT", "char_str_list");
 	  $query->debuglog("  DirectiveSet->new(): TXT query on $current_domain returned error=$query->{error}, last_dns_error=$query->{last_dns_error}");
 
@@ -1571,6 +1625,7 @@ sub try_fallback {
 	      my $spf = $c2s->convert();
 	      $query->debuglog("  CID2SPF:  in: $xml");
 	      $query->debuglog("  CID2SPF: out: $spf");
+	      $query->{spf_source} = "Microsoft Caller-ID for Email record at $ep_version";
 	      @txt = $spf;
 	    }
 	  }
