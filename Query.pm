@@ -5,7 +5,7 @@ package Mail::SPF::Query;
 #
 # 		       Meng Weng Wong
 #		  <mengwong+spf@pobox.com>
-# $Id: Query.pm,v 1.29 2003/12/17 22:29:25 devel Exp $
+# $Id: Query.pm,v 1.31 2003/12/19 03:20:53 devel Exp $
 # test an IP / sender address pair for pass/fail/nodata/error
 #
 # http://spf.pobox.com/
@@ -41,11 +41,11 @@ my $GUESS_MECHS = "a/24 mx/24 ptr exists:%{p}.wl.trusted-forwarder.org exists:%{
 
 my @KNOWN_MECHANISMS = qw( a mx ptr include ip4 ip6 exists all );
 
-my $MAX_RECURSION_DEPTH = 10;
+my $MAX_LOOKUP_COUNT    = 20;
 
 my $Domains_Queried = {};
 
-$VERSION = "1.10";
+$VERSION = "1.96";
 
 $CACHE_TIMEOUT = 120;
 
@@ -96,7 +96,7 @@ of an SMTP client IP.
   optional parameters:
      guess_mechs => "a/24 mx/24 ptr exists:%{p}.wl.trusted-forwarder.org",
      debug => 1, debuglog => sub { print STDERR "@_\n" },
-     max_recursion_depth => 10,
+     max_lookup_count => 20,          # total number of SPF include/redirect queries
      myhostname => "foo.example.com", # prepended to header_comment
 
   if ($@) { warn "bad input to Mail::SPF::Query: $@" }
@@ -154,7 +154,8 @@ sub new {
 			   $query->{ipv6} ? die "IPv6 not supported" : "");
 
   if (not $query->{myhostname}) {
-    eval { require Sys::Hostname; require Sys::Hostname::Long };
+    use Sys::Hostname; 
+    eval { require Sys::Hostname::Long };
     $query->{myhostname} = $@ ? hostname() : Sys::Hostname::Long::hostname_long();
   }
 
@@ -297,6 +298,7 @@ sub best_guess {
 				 );
 
   $guess_query->{depth} = 0;
+  $guess_query->top->{lookup_count} = 0;
 
   # if result is not defined, the domain has no SPF.
   #    perform fallback lookups.
@@ -359,6 +361,8 @@ sub spfquery {
 
   if ($query->{ipv4} and
       $query->{ipv4}=~ /^127\./) { return "pass", "localhost is always allowed." }
+
+  $query->top->{lookup_count}++;
 
   if ($query->is_looping)            { return "UNKNOWN", $query->is_looping }
   if ($query->can_use_cached_result) { return $query->cached_result; }
@@ -443,14 +447,18 @@ sub is_looping {
 	not defined $Domains_Queried->{$cache_point}->[0]);
 
   return (join " ", "exceeded maximum recursion depth:", @{$query->{loop_report}})
-    if ($query->{depth} >= $query->max_recursion_depth);
+    if ($query->{depth} >= $query->max_lookup_count);
+
+  return ("query caused more than " . $query->max_lookup_count . " lookups") if ($query->max_lookup_count 
+										 and
+										 $query->top->{lookup_count} > $query->max_lookup_count);
 
   return 0;
 }
 
-sub max_recursion_depth {
+sub max_lookup_count {
   my $query = shift;
-  return $query->{max_recursion_depth} || $MAX_RECURSION_DEPTH;
+  return $query->{max_lookup_count} || $MAX_LOOKUP_COUNT;
 }
 
 sub can_use_cached_result {
