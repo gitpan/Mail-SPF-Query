@@ -5,7 +5,7 @@ package Mail::SPF::Query;
 #
 # 		       Meng Weng Wong
 #		  <mengwong+spf@pobox.com>
-# $Id: Query.pm,v 1.33 2004/01/14 03:28:15 devel Exp $
+# $Id: Query.pm,v 1.35 2004/02/26 03:29:16 devel Exp $
 # test an IP / sender address pair for pass/fail/nodata/error
 #
 # http://spf.pobox.com/
@@ -32,14 +32,21 @@ package Mail::SPF::Query;
 # 
 # pass - explicit pass --- message is not a forgery
 #
-# TODO: add ipv6 support
-#
+# TODO:
+#  - add ipv6 support
+#  - parse caller-id and convert to spf
+#  - support the new header syntax, which will break some preexisting code
+#    (Received-SPF will now have a three part structure)
+#  - rename to v2.0 when we add caller-id support and the header syntax
+# 
 # BUGS:
 #  mengwong 20031211
 #    if there are multiple unrecognized mechanisms, they all
 #    need to be preserved in the 'unknown' Received-SPF header.
 #    right now only the first appears.
-# ----------------------------------------------------------
+# 
+#  mengwong 20040225: override and fallback keys need to be lc'ed at start
+# # ----------------------------------------------------------
 
 use 5.006;
 use strict;
@@ -70,7 +77,7 @@ my $Domains_Queried = {};
 # if not set, then softfail is treated as neutral.
 my $softfail_supported = 1;
 
-$VERSION = "1.991";
+$VERSION = "1.992";
 
 $CACHE_TIMEOUT = 120;
 
@@ -83,7 +90,7 @@ my $looks_like_email = qr/\S+\@\S+/;
 
 =head1 NAME
 
-Mail::SPF::Query - query Sender Permitted From for an IP,email,helo
+Mail::SPF::Query - query Sender Policy Framework for an IP,email,helo
 
 =head1 SYNOPSIS
 
@@ -131,6 +138,12 @@ instead of C<result()>.
 If you do not know what a secondary MX is, you probably
 don't have one.  Use the first style.
 
+You can try out Mail::SPF::Query on the command line with
+the following command:
+
+  perl -MMail::SPF::Query -le 'print for Mail::SPF::Query->new(helo=>shift, ipv4=>shift, sender=>shift)->result' myhost.mydomain.com 1.2.3.4 myname@myhost.mydomain.com
+
+
 =head1 METHODS
 
 =over
@@ -150,6 +163,10 @@ don't have one.  Use the first style.
      max_lookup_count => 20,          # total number of SPF include/redirect queries
      sanitize => 0,                   # do not sanitize all returned strings
      myhostname => "foo.example.com", # prepended to header_comment
+     fallback => {   "foo.com" => { record => "v=spf1 a mx -all", OPTION => VALUE },
+                   "*.foo.com" => { record => "v=spf1 a mx -all", OPTION => VAULE }, },
+     override => {   "bar.com" => { record => "v=spf1 a mx -all", OPTION => VALUE },
+                   "*.bar.com" => { record => "v=spf1 a mx -all", OPTION => VAULE }, },
 
   if ($@) { warn "bad input to Mail::SPF::Query: $@" }
 
@@ -176,6 +193,12 @@ and this function will be used to sanitize the returned values. The function mus
 argument and return a single string which contains the sanitized result.
 
 Set C<debug=E<gt>1> to watch the queries happen.
+
+Set C<fallback> to define "pretend" SPF records for domains
+that don't publish them yet.  Wildcards are supported.
+
+Set C<override> to define SPF records for domains that do
+publish but which you want to override anyway.
 
 =cut
 
@@ -270,11 +293,11 @@ C<fail> means the client IP is not a designated mailer, and
 the sender wants you to reject the transaction for fear of
 forgery.
 
-C<softfail> means the client IP is not a designated mailer, and
-the sender prefers that you reject the transaction for fear of
-forgery. However, this is explicitly left as a local decision.
-The C<softfail> status is often used during initial deployment
-of SPF records by a domain.
+C<softfail> means the client IP is not a designated mailer,
+but the sender prefers that you accept the transaction
+because it isn't absolutely sure all its users are mailing
+through approved servers.  The C<softfail> status is often
+used during initial deployment of SPF records by a domain.
 
 C<neutral> means that the sender makes no assertion about the
 status of the client IP.
@@ -328,9 +351,12 @@ sub result {
   my $query = shift;
   my %result_set;
 
-  my ($result, $smtp_explanation, $smtp_why) = $query->spfquery( ($query->{best_guess} ? $query->{guess_mechs} : () ) );
+  my ($result, $smtp_explanation, $smtp_why, $orig_txt) = $query->spfquery( ($query->{best_guess} ? $query->{guess_mechs} : () ) );
 
   # print STDERR "*** result = $result, exp = $smtp_explanation, why = $smtp_why\n";
+
+  # before this, we weould see a "default" on the end: Please see http://spf.pobox.com/why.html?sender=mengwong%40vw.mailzone.com&ip=208.210.125.1&receiver=poopy.com: default
+  $smtp_why = "" if $smtp_why eq "default";
 
   my $smtp_comment = ($smtp_explanation && $smtp_why) ? "$smtp_explanation: $smtp_why" : ($smtp_explanation || $smtp_why);
 
@@ -343,7 +369,7 @@ sub result {
   return ($query->sanitize(lc $result),
 	  $query->sanitize($smtp_comment),
 	  $query->sanitize($header_comment),
-	  $query->sanitize($query->{directive_set}->{orig_txt}),
+	  $query->sanitize($orig_txt),
 	 ) if wantarray;
 
   return  $query->sanitize(lc $result);
@@ -439,7 +465,7 @@ sub result2 {
           $query->debuglog("result2: Checking status of recipient $recip (at host $rhost)");
 
           my $cache_result = $query->{mx_cache}->{$rhost};
-          if (!defined($cache_result)) {
+          if (not defined($cache_result)) {
               $cache_result = $query->{mx_cache}->{$rhost} = is_secondary_for($rhost, $query->{ipv4}) ? 'yes' : 'no';
               $query->debuglog("result2: $query->{ipv4} is a MX for $rhost: $cache_result");
           }
@@ -731,11 +757,14 @@ sub debuglog {
 
 sub spfquery {
   #
-  # usage: my ($result, $explanation, $text, $time) = $query->spfquery()
+  # usage: my ($result, $explanation, $text, $time) = $query->spfquery( [ GUESS_MECHS ] )
   #
   #  performs a full SPF resolution using the data in $query.  to use different data, clone the object.
   #
+  #  if GUESS_MECHS is present, we are operating in "guess" mode so we will not actually query the domain for TXT; we will use the guess_mechs instead.
+  #
   my $query = shift;
+  my $guess_mechs = shift;
 
   if ($query->{ipv4} and
       $query->{ipv4}=~ /^127\./) { return "pass", "localhost is always allowed." }
@@ -746,7 +775,7 @@ sub spfquery {
   if ($query->can_use_cached_result) { return $query->cached_result; }
   else                               { $query->tell_cache_that_lookup_is_underway; }
 
-  my $directive_set = DirectiveSet->new($query->{domain}, $query, $_[0], $query->{local}, $query->{default_record});
+  my $directive_set = DirectiveSet->new($query->{domain}, $query, $guess_mechs, $query->{local}, $query->{default_record});
 
   if (not defined $directive_set) {
     $query->debuglog("no SPF record found for $query->{domain}");
@@ -756,6 +785,10 @@ sub spfquery {
             return "error", $query->{spf_error_explanation}, $query->{error};
         }
         return "unknown", $query->{spf_error_explanation}, "Missing SPF record at $query->{domain}";
+    }
+    if ($query->{last_dns_error} eq 'NXDOMAIN') {
+        my $explanation = $query->macro_substitute($query->{default_explanation});
+        return "fail", $explanation, "domain of sender $query->{sender} does not exist";
     }
     return "none", "SPF", "domain of sender $query->{sender} does not designate mailers";
   }
@@ -782,8 +815,11 @@ sub spfquery {
       my $explanation = $query->interpolate_explanation(
             ($result =~ /^unknown/)
             ? $query->{spf_error_explanation} : $query->{default_explanation});
-      $query->save_result_to_cache($result, $explanation, $comment);
-      return $result, $explanation, $comment;
+      $query->save_result_to_cache($result,
+				   $explanation,
+				   $comment,
+				   $query->{directive_set}->{orig_txt});
+      return $result, $explanation, $comment, $query->{directive_set}->{orig_txt};
     }
   }
 
@@ -860,7 +896,7 @@ sub can_use_cached_result {
     $query->debuglog("  lookup: we have already processed $query->{domain} before with $query->{ipv4}.");
     my @cached = @{ $Domains_Queried->{$cache_point} };
     if (not defined $CACHE_TIMEOUT
-	or time - $cached[3] > $CACHE_TIMEOUT) {
+	or time - $cached[-1] > $CACHE_TIMEOUT) {
       $query->debuglog("  lookup: but its cache entry is stale; deleting it.");
       delete $Domains_Queried->{$cache_point};
       return 0;
@@ -876,15 +912,15 @@ sub tell_cache_that_lookup_is_underway {
   my $query = shift;
 
   # define an entry here so we don't loop endlessly in an Include loop.
-  $Domains_Queried->{$query->cache_point} = [undef, undef, time];
+  $Domains_Queried->{$query->cache_point} = [undef, undef, undef, undef, time];
 }
 
 sub save_result_to_cache {
   my $query = shift;
-  my ($result, $explanation, $comment) = (shift, shift, shift);
+  my ($result, $explanation, $comment, $orig_txt) = (shift, shift, shift, shift);
 
   # define an entry here so we don't loop endlessly in an Include loop.
-  $Domains_Queried->{$query->cache_point} = [$result, $explanation, $comment, time];
+  $Domains_Queried->{$query->cache_point} = [$result, $explanation, $comment, $orig_txt, time];
 }
 
 sub cached_result {
@@ -1074,6 +1110,8 @@ sub myquery {
     return;
   }
 
+  $query->{last_dns_error} = $errorstring;
+
   if (not $resquery) {
     if ($errorstring eq "NXDOMAIN") {
       $query->debuglog("  myquery: $label $qtype failed: NXDOMAIN.");
@@ -1091,8 +1129,8 @@ sub myquery {
   # $query->debuglog("  myquery: found $qtype response: @answers");
 
   my @toreturn;
-  if ($sortby) { @toreturn = map { $_->$method() } sort { $a->$sortby() <=> $b->$sortby() } @answers; }
-  else         { @toreturn = map { $_->$method() }                                          @answers; }
+  if ($sortby) { @toreturn = map { rr_method($_,$method) } sort { $a->$sortby() <=> $b->$sortby() } @answers; }
+  else         { @toreturn = map { rr_method($_,$method) }                                          @answers; }
 
   if (not @toreturn) {
     $query->debuglog("  myquery: result had no data.");
@@ -1100,6 +1138,19 @@ sub myquery {
   }
 
   return @toreturn;
+}
+
+sub rr_method {
+  my ($answer, $method) = @_;
+  if ($method ne "char_str_list") { return $answer->$method() }
+
+  # long TXT records can't be had with txtdata; they need to be pulled out with char_str_list which returns a list of strings
+  # that need to be joined.
+
+  my @char_str_list = $answer->$method();
+  # print "rr_method returning join of @char_str_list\n";
+
+  return join "", @char_str_list;
 }
 
 #
@@ -1148,13 +1199,14 @@ sub mech_include {
                                   default_record => undef,
 				 );
 
-  my ($result, $explanation, $text, $time) = $inner_query->spfquery();
+  my ($result, $explanation, $text, $orig_txt, $time) = $inner_query->spfquery();
 
   $query->debuglog("  mechanism include: got back result $result / $text / $time");
 
   if ($result eq "pass")            { return hit     => $text, $time; }
   if ($result eq "error")           { return $result => $text, $time; }
   if ($result eq "unknown")         { return $result => $text, $time; }
+  if ($result eq "none")            { return unknown => $text, $time; } # fail-safe mode.  convert an included NONE into an UNKNOWN error.
   if ($result eq "fail" ||
       $result eq "neutral" ||
       $result eq "softfail")        { return undef,     $text, $time; }
@@ -1294,7 +1346,7 @@ sub mech_exists {
   foreach ($query->myquery($domain_to_use, "A", "address")) {
     $query->debuglog("  mechanism exists: $_");
     $query->debuglog("  mechanism exists: we have a match.");
-    my @txt = map { s/^"//; s/"$//; $_ } $query->myquery($domain_to_use, "TXT", "txtdata");
+    my @txt = map { s/^"//; s/"$//; $_ } $query->myquery($domain_to_use, "TXT", "char_str_list");
     if (@txt) {
         return hit => join(" ", @txt);
     }
@@ -1382,11 +1434,52 @@ sub interpolate_explanation {
   my $txt = shift;
 
   if ($query->{directive_set}->explanation) {
-    my @txt = map { s/^"//; s/"$//; $_ } $query->myquery($query->macro_substitute($query->{directive_set}->explanation), "TXT", "txtdata");
+    my @txt = map { s/^"//; s/"$//; $_ } $query->myquery($query->macro_substitute($query->{directive_set}->explanation), "TXT", "char_str_list");
     $txt = join " ", @txt;
   }
 
   return $query->macro_substitute($txt);
+}
+
+sub find_ancestor {
+  my $query = shift;
+  my $current_domain = shift;
+  my $which_hash = shift;
+
+  $current_domain =~ s/\.$//g;
+  my @current_domain = split /\./, $current_domain;
+
+  foreach my $ancestor_level (0 .. @current_domain) {
+    my @ancestor = @current_domain;
+    for (1 .. $ancestor_level) { shift @ancestor }
+    my $ancestor = join ".", @ancestor;
+
+    for my $match ($ancestor_level > 0 ? "*.$ancestor" : $ancestor) {
+      $query->debuglog("  DirectiveSet $which_hash: is $match in the $which_hash hash?");
+      if (my $found = $query->{$which_hash}->{lc $match}) {
+	$query->debuglog("  DirectiveSet override: yes, it is; the record is $found->{record}.");
+	my $txt = $found->{record};
+	$query->{spf_source} = "explicit $which_hash found: $match defines $txt";
+	$txt = "v=spf1 $txt" if $txt !~ /^v=spf1\b/i;
+	return $txt;
+      }
+    }
+  }
+  return;
+}
+
+sub try_override {
+  my $query = shift;
+  my $current_domain = shift;
+
+  return $query->find_ancestor($current_domain, "override");
+}
+
+sub try_fallback {
+  my $query = shift;
+  my $current_domain = shift;
+
+  return $query->find_ancestor($current_domain, "fallback");
 }
 
 # ----------------------------------------------------------
@@ -1406,15 +1499,39 @@ sub interpolate_explanation {
 
     my $txt;
 
+    # overrides can come from two places:
+    #  1 - when operating in best_guess mode, spfquery may be called with a ($guess_mechs) argument, which comes in as $override_text.
+    #  2 - when operating with ->new(..., override => { ... }) we need to load the override dynamically.
+
+    if (not $override_text
+	and
+	exists $query->{override}
+       ) {
+      $txt = $query->try_override($current_domain);
+    }
+
     if ($override_text) {
       $txt = "v=spf1 $override_text ?all";
       $query->{spf_source} = "local policy";
     }
     else {
       $query->debuglog("  DirectiveSet->new(): doing TXT query on $current_domain");
-      my @txt = $query->myquery($current_domain, "TXT", "txtdata");
+      my @txt = $query->myquery($current_domain, "TXT", "char_str_list");
+      $query->debuglog("  DirectiveSet->new(): TXT query on $current_domain returned error=$query->{error}, last_dns_error=$query->{last_dns_error}");
 
-      return if ($query->{error});
+      if ($query->{error} || $query->{last_dns_error} eq 'NXDOMAIN' || ! @txt) {
+	# try the fallbacks.
+	$query->debuglog("  DirectiveSet->new(): will try fallbacks.");
+	if (exists $query->{fallback}
+	    and
+	    my $found_txt = $query->try_fallback($current_domain, "fallback")) {
+	  @txt = $found_txt;
+	}
+	else {
+	  $query->debuglog("  DirectiveSet->new(): fallback search failed.");
+	  return;
+	}
+      }
 
       # squish multiline responses into one first.
 
@@ -1438,7 +1555,8 @@ sub interpolate_explanation {
 
     return if not defined $txt;
 
-    my $directive_set = bless { orig_txt => "v=spf1$txt", txt => $txt } , $class;
+    # TODO: the prepending of the v=spf1 is a massive hack; get it right by saving the actual raw orig_txt.
+    my $directive_set = bless { orig_txt => ($txt =~ /^v=spf1/ ? $txt : "v=spf1$txt"), txt => $txt } , $class;
 
     TXT_RESPONSE:
     for ($txt) {

@@ -3,7 +3,7 @@
 # mengwong@pobox.com
 # Wed Dec 10 03:52:04 EST 2003
 # postfix-policyd-spf
-# version 1.02
+# version 1.03
 # see http://spf.pobox.com/
 
 use Fcntl;
@@ -196,8 +196,9 @@ sub sender_permitted_from {
 
   if    ($result eq "pass")  { return "DUNNO"; }
   elsif ($result eq "fail")  { return "REJECT " . ($smtp_comment || $header_comment); }
-  elsif ($result eq "error") { return "DUNNO"; }
+  elsif ($result eq "error") { return "450 temporary failure: $smtp_comment"; }
   else                       { return "DUNNO"; }
+  # unknown, softfail, neutral and none all return DUNNO
 
   # TODO XXX: prepend Received-SPF header.  Wietse says he will add that functionality soon.
 }

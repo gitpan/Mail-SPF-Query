@@ -231,7 +231,9 @@
 83	55.spf1-test.mailzone.com	192.0.2.130	unknown
 
 # SPF1_TEST(56) deliberately left blank
-84 56.spf1-test.mailzone.com    192.0.2.200       none
+84 56.spf1-test.mailzone.com    192.0.2.200       fail
+
+# TODO: none and fail are both acceptable.  we need a way to indicate that multiple result codes are OK.
 
 # include something that doesn't have SPF records
 # '57.spf1-test.mailzone.com:v=spf1 include\072spf1-test.mailzone.com         -all:60
@@ -382,7 +384,7 @@
 
 # '51.spf1-test.mailzone.com:v=spf1 include\07242.spf1-test.mailzone.com                  -all:60
 # '10.spf1-test.mailzone.com:v=spf1 mx                                          -all:60
-179,180,181	10.spf1-test.mailzone.com:include:42.%{d3}	192.0.2.200	fail	explanation: default	domain of 10.spf1-test.mailzone.com does not designate 192.0.2.200 as permitted sender
+179,180,181	10.spf1-test.mailzone.com:include:42.%{d3}	192.0.2.200	fail	explanation	domain of 10.spf1-test.mailzone.com does not designate 192.0.2.200 as permitted sender
 182,183,184	10.spf1-test.mailzone.com:include:42.%{d3} +all	192.0.2.200	pass	/./	local policy designates 192.0.2.200 as permitted sender
 185,186,187	10.spf1-test.mailzone.com:include:42.%{d3} +all	192.0.2.110	pass	/./	SPF record at 42.spf1-test.mailzone.com designates 192.0.2.110 as permitted sender
 
@@ -399,4 +401,4 @@
 
 218,219,220	10.spf1-test.mailzone.com:include:servfail.%{d3}	192.0.2.200	error	explanation: DNS error while looking up servfail.spf1-test.mailzone.com TXT: SERVFAIL	encountered temporary error during SPF processing of domain of 10.spf1-test.mailzone.com
 
-221,222,223	10.spf1-test.mailzone.com:~all	192.0.2.200	softfail	explanation: default	transitioning local policy does not designate 192.0.2.200 as permitted sender
+221,222,223	10.spf1-test.mailzone.com:~all	192.0.2.200	softfail	explanation	transitioning local policy does not designate 192.0.2.200 as permitted sender

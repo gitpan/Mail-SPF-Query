@@ -1,5 +1,5 @@
-Mail/SPF/Query version 1.2
-===========================
+Mail/SPF/Query version 1.991
+============================
 
 The SPF protocol relies on sender domains to publish a DNS
 whitelist of their designated outbound mailers.  Given an
@@ -12,21 +12,20 @@ SEE ALSO
 
 USAGE
 
-  perl -MMail::SPF::Query -le 'print for Mail::SPF::Query->new(ipv4=>shift, sender=>shift)->result' 1.2.3.4 myname@myhost.mydomain.com
+  perl -MMail::SPF::Query -le 'print for Mail::SPF::Query->new(helo=>shift, ipv4=>shift, sender=>shift)->result' myhost.mydomain.com 1.2.3.4 myname@myhost.mydomain.com
       
+   none     (domain of sender myname@myhost.mydomain.com does not designate permitted sender hosts)
    pass     (client localhost[1.2.3.4] is designated mailer for domain of sender myname@myhost.mydomain.com)
    error    (temporary failure while resolving designated mailer status for domain of sender myname@myhost.mydomain.com)
    unknown  (domain of sender myname@myhost.mydomain.com does not designate mailers)
+   neutral  (client localhost[1.2.3.4] is neither permitted not denied by domain of sender myname@myhost.mydomain.com)
    fail     (client localhost[1.2.3.4] is not a designated mailer for domain of sender myname@myhost.mydomain.com)
    softfail (client localhost[1.2.3.4] is not a designated mailer for transitioning domain of sender myname@myhost.mydomain.com)
 
 FEATURES
 
-  Mail::SPF::Query supports the following features:
-
-  1) SPFinclude responses trigger an aliasing mechanism
-  2) spf=softdeny responses change the response to softfail
-  3) due to wildcard occlusion, also query _default._smtp_client
+  trusted-forwarder.org support
+  best_guess support
 
 INSTALLATION
 
@@ -42,6 +41,9 @@ DEPENDENCIES
 This module requires these other modules and libraries:
 
   Net::DNS
+  Net::CIDR::Lite
+  Sys::Hostname::Long
+  URI
 
 COPYRIGHT AND LICENCE
 

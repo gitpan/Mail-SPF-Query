@@ -6,7 +6,8 @@ WriteMakefile(
     'VERSION_FROM'	=> 'Query.pm', # finds $VERSION
     'PREREQ_PM'		=> { Net::DNS => 0.33,
                              Net::CIDR::Lite => 0.15,
-                             URI::Escape => 3.20,
+			     Sys::Hostname::Long => 1.0,
+                             URI => 1.00,
 	 },
     ($] >= 5.005 ?    ## Add these new keywords supported since 5.005
       (ABSTRACT_FROM => 'Query.pm', # retrieve abstract from module

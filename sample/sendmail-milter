@@ -1,11 +1,21 @@
+#!/usr/bin/perl
+#
 # Sendmail Milter to perform SPF lookups
+#
+# (If you use the shebang line, make sure it contains
+# a thread-enabled Perl!)
 #
 # Code by Mark Kramer <admin@asarian-host.net> on December 3, 2003
 #
-# Version 1.21
+# Version 1.30
 #
-# Last revision: January 25, 2004
+# Last revision: January 30, 2004
 #
+# With thanks to Alain Knaff for adding improved "Getopt" functionality,
+# waitpid stuff to ensure spf-milter parent does not exit until child
+# is really up and running, a new option to kill the milter, and one to
+# add local policy.
+
 # Tested under Perl, v5.8.0 built for i386-freebsd-thread-multi,
 # using the Sendmail::Milter 0.18 engine.
 #
@@ -19,13 +29,52 @@
 # this version is compatible with SPF draft 02.9.4.
 #
 
+# INSTALLATION:
+# =============
+#
+# Basic INSTALL doc at http://spf.pobox.com/sendmail-milter-INSTALL.txt
+#
+# Adiitional install notes by Alain Knaff:
+#
+# The milter must be started/stopped explicitly before/after sendmail.
+# Add the following to /etc/init.d/sendmail to start it (must be
+# before starting sendmail):
+#
+#   $SPF_MILTER -l 'include:local-forwarders' mail
+#
+# where local-forwarders is the name of a pseudo-domain holding an SPF
+# record describing all hosts allowed to bypass SPF checks (typically,
+# foreign hosts on which your users have set up .forwards pointing
+# towards addresses hosted by you). If none of your users have set up
+# any forwarding, you can leave this away
+#
+# Add the following to stop it (must be after stopping sendmail):
+#
+#   $SPF_MILTER -k
+#
+# Note: This milter looks for the sendmail.cf file in /etc/mail. If
+# your sendmail.cf lives elsewhere (SuSE), establish a symlink:
+#   ln -s /etc/sendmail.cf /etc/mail/sendmail.cf
+#
+# ==============
+
 # ----------------------------------------------------------
 # 			   config
 # ----------------------------------------------------------
 
+# where do we store pid, sock, and logs? No trailing / please!
+# Set it at will, like '/var/spool/spf-milter', as long as it
+# ends in "spf-milter". Sanity check, further down the road,
+# will ensure that it does!
+#
+# If you change $basedir, be sure to make the same change to
+# INPUT_MAIL_FILTER in your mc file!
+
+my $basedir = '/var/spf-milter';
+
 # where do we log SPF activity?
 
-my $SPF_LOG_FILENAME = POSIX::strftime("/var/spf-milter/spflog-%Y%m.log", localtime);
+my $SPF_LOG_FILENAME = POSIX::strftime ($basedir . "/spflog-%Y%m.log", localtime);
 
 # do we feel a need to flock the SPF logfile?
 
@@ -35,17 +84,27 @@ use constant FLOCK_SPFLOG => 0;
 # 	 no user-serviceable parts below this line
 # ----------------------------------------------------------
 
-use POSIX;
+use POSIX qw (:sys_wait_h);
 use Sendmail::Milter;
 use Socket;
 use Mail::SPF::Query;
 use threads;
 use threads::shared;
 use strict;
+use Getopt::Std;
+use Errno qw (ESRCH EINTR);
+
+use vars qw/$opt_k $opt_l $opt_t $opt_m $opt_h $opt_T/;
+
+my $pidFile = $basedir . '/spf-milter.pid';
+my $sock = $basedir . '/spf-milter.sock';
+
+my @extraParams : shared = ();
 
 my $mx_mode : shared = 0;
 my $our_hostname : shared = 0;
 my $trust : shared = 1;
+my $tagOnly : shared = 0;
 
 my ($conn, $user, $pid, $login, $pass, $uid, $gid);
 
@@ -116,17 +175,17 @@ sub socket_call : locked {
 
         my $priv_data = shift;
 
-        if (my $query = eval {new Mail::SPF::Query (ip => shift, sender => shift, helo => shift, trusted => $trust)}) {
+        if (my $query = eval {new Mail::SPF::Query (ip => shift, sender => shift, helo => shift, @extraParams)}) {
             my ($call_status, $result, $smtp_comment, $header_comment, $spf_record);
 
-            # In "mx" mode, we make a call to result2(), instead of to result(),
+            # In "mx" mode, we make a call to result2 (), instead of to result (),
             # to which we parse an extra parameter, $priv_data->{'to'}, so
-            # result2() can check against secondaries for the recipent.
+            # result2 () can check against secondaries for the recipent.
 
             if ($mx_mode) {
-                $call_status = eval {($result, $smtp_comment, $header_comment, $spf_record) = $query->result2(shift)};
+                $call_status = eval {($result, $smtp_comment, $header_comment, $spf_record) = $query->result2 (shift)};
             } else {
-                $call_status = eval {($result, $smtp_comment, $header_comment, $spf_record) = $query->result()};
+                $call_status = eval {($result, $smtp_comment, $header_comment, $spf_record) = $query->result ()};
             }
 
             if ($call_status) {
@@ -220,15 +279,6 @@ sub envfrom_callback : locked {
     delete $priv_data->{'spf_result'};
 
     # SASL authenticated IP addresses always pass!
-    #
-    # Be sure to add the following lines to your sendmail.cf, or SMTP AUTH
-    # parameters (amongst others) are not parsed!
-    #
-    # O Milter.LogLevel=9
-    # O Milter.macros.connect=j, _, {daemon_name}, {if_name}, {if_addr}
-    # O Milter.macros.helo={tls_version}, {cipher}, {cipher_bits}, {cert_subject}, {cert_issuer}
-    # O Milter.macros.envfrom=i, {auth_type}, {auth_authen}, {mail_mailer}, {mail_host}, {mail_addr}
-    # O Milter.macros.envrcpt={rcpt_mailer}, {rcpt_host}, {rcpt_addr}
 
     if ($priv_data->{'is_authenticated'}) {
 	$priv_data->{'spf_result'} = "pass";
@@ -256,8 +306,14 @@ sub envfrom_callback : locked {
 
     if ($priv_data->{'spf_result'} = socket_call (2, $priv_data, $priv_data->{'ipaddr'}, $priv_data->{'from'}, $priv_data->{'helo'})) {
         if ($priv_data->{'spf_result'} eq 'fail') {
-            $ctx->setreply('550', '5.7.1', "$priv_data->{'spf_smtp_comment'}");
-            return SMFIS_REJECT;
+	    if ($tagOnly) {
+		write_log ("SPF \"fail\" from ip=".$priv_data->{'ipaddr'}.
+			   " helo=".$priv_data->{'helo'}.
+			   " from=".$priv_data->{'from'});
+	    } else {
+		$ctx->setreply('550', '5.7.1', "$priv_data->{'spf_smtp_comment'}");
+		return SMFIS_REJECT;
+	    }
         } elsif ($priv_data->{'spf_result'} eq 'error') {
             $ctx->setreply('451', '4.7.1', "An error occurred during SPF processing of $priv_data->{'from'}. Please try again later");
             return SMFIS_TEMPFAIL;
@@ -296,8 +352,15 @@ sub envrcpt_callback : locked {
 
     if ($priv_data->{'spf_result'} = socket_call (2, $priv_data, $priv_data->{'ipaddr'}, $priv_data->{'from'}, $priv_data->{'helo'}, $priv_data->{'to'})) {
         if ($priv_data->{'spf_result'} eq 'fail') {
-            $ctx->setreply('550', '5.7.1', "$priv_data->{'spf_smtp_comment'}");
-            return SMFIS_REJECT;
+	    if ($tagOnly) {
+		write_log ("SPF \"fail\" from ip=".$priv_data->{'ipaddr'}.
+			   " helo=".$priv_data->{'helo'}.
+			   " from=".$priv_data->{'from'}.
+			   " to=".$priv_data->{'to'});
+	    } else {
+		$ctx->setreply('550', '5.7.1', "$priv_data->{'spf_smtp_comment'}");
+		return SMFIS_REJECT;
+	    }
         } elsif ($priv_data->{'spf_result'} eq 'error') {
             $ctx->setreply('451', '4.7.1', "An error occurred during SPF processing of $priv_data->{'from'}. Please try again later");
             return SMFIS_TEMPFAIL;
@@ -371,7 +434,7 @@ my %my_callbacks =
 #
 # Add "mx" as second parameter to run spf-milter in "mx" mode. In "mx" mode
 # spf-milter makes its SPF checks at envrcpt_callback, instead of envfrom_callback,
-# and calls result2(), instead of result(), to allow for an early-out for
+# and calls result2 (), instead of result (), to allow for an early-out for
 # secondaries. The default mode performs SPF checks at envfrom_callback.
 #
 # Per default, spf-milter queries trusted-fowarder.org (on 'fail' only), to
@@ -380,50 +443,132 @@ my %my_callbacks =
 # (or third, if you run in "mx" mode). You need at least Mail::SPF::Query 1.99
 # for this functionality!
 
+getopts("kl:tmhT");
+
+sub usage {
+    my ($ret) = @_;
+    print STDERR "Usage: $0 [-k] [-l local_trust] [-t] [-m] [-h] <user> [mx] [dt]\n";
+    print STDERR "	-k	kill running milter\n";
+    print STDERR "	-l	add local trust record\n";
+    print STDERR "	-t	don't add trusted-forwarder.org record\n";
+    print STDERR "	-m	trust recipient's MX hosts\n";
+    print STDERR "	-T	don't reject failed messages, tag only\n";
+    print STDERR "	-h	print this help message\n";
+    print STDERR "	<user>	user to run this script as\n";
+    print STDERR "	mx	trust recipient's MX hosts (same as -m)\n";
+    print STDERR "	dt	don't add trusted-forwarder.org (same as -t)\n";
+    exit ($ret);
+}
+
+if ($opt_h) {
+    usage (0);
+}
+
+# Basic, but vital, sanity-check against $basedir. Since we set
+# permissions/ownerships on everything (!) in our $basedir, we
+# must avoid disasters, such as setting $basedir to /var/run/.
+# Therefore, we require that $basedir ends in "spf-milter".
+
+if (not ($basedir =~ /spf-milter$/i)) {
+    die '$basedir' . " ('$basedir') must end in /spf-milter!\n";
+}
+
+my $oldPid;
+if (-f $pidFile) {
+    open (PIDFILE, $pidFile) || die "Could not read pid file: $!\n";
+    my $pid = <PIDFILE>;
+    if ($pid > 0) {
+	$oldPid=$pid;
+    }
+
+}
+
+if (defined $opt_k) {
+    die "SPF milter not running\n" if (!defined $oldPid);
+
+    # We need to kill the milter using signal 3, it apparently doesn't react
+    # to more "usual" signals...
+
+    if (!kill (3, $oldPid)) {
+	if ($!{ESRCH}) {
+	    print STDERR "Sendmail milter not running, cleaning files\n";
+
+	    # Files will be cleaned by END block
+
+	    exit (0);
+	} else {
+
+	    # Prevent cleaning away of the running milter's files
+
+	    die "Could not kill SPF milter: $!\n";
+	}
+    }
+
+    my $needNl=0;
+    select (STDERR);
+    $|=1;
+
+    # Waiting for milter to die
+
+    for (my $i=0; $i<79; $i++) {
+	select (undef, undef, undef, 0.25);
+	if (!kill (0, $oldPid) && $!{ESRCH}) {
+	    print STDERR "\n" if ($needNl);
+	    exit (0); # Milter dead
+	}
+	print STDERR ".";
+	$needNl=1;
+    }
+    print STDERR "\nForcefully killing milter\n";
+    kill (9, $oldPid);
+    exit (0);
+}
+
+if ($oldPid) {
+    my $r = kill (0, $oldPid);
+    if (!$!{ESRCH}) {
+	$pid=1; # Prevent cleaning away of the running milter's files
+	die "SPF milter already running\n";
+    }
+}
+
+unlink $sock;
+unlink $pidFile;
+
 if (not $user = lc ($ARGV[0])) {
-    print "Usage: perl $0 <user_to_run_as> [mx]\n";
-    exit 1;
+    print STDERR "Missing user\n";
+    usage (1);
 } elsif ($>) {
-    print "You need to start spf-milter as root!\n";
+    print STDERR "You need to start spf-milter as root!\n";
     exit 1;
 }
 
-$mx_mode = 1 if (lc ($ARGV[1]) eq 'mx');
+$mx_mode = 1 if ($opt_m || (lc ($ARGV[1]) eq 'mx'));
 
-$trust = 0 if ((lc ($ARGV[1]) eq 'dt') || (lc ($ARGV[2]) eq 'dt'));
+$trust = 0 if ($opt_t || (lc ($ARGV[1]) eq 'dt') || (lc ($ARGV[2]) eq 'dt'));
+push (@extraParams, trusted => $trust);
+
+if ($opt_l) {
+    push (@extraParams, local => $opt_l);
+}
+
+if ($opt_T) {
+    $tagOnly = 1;
+}
 
 # Since we will daemonize, play nice.
 
 chdir ('/') or exit 1;
 
-open (STDIN, '/dev/null');
-open (STDOUT, '>/dev/null');
-
 umask (0077);
 
-if (not (-e '/var/spf-milter')) {
-    if (not mkdir '/var/spf-milter') {
-        print STDERR "Odd; cannot create /var/spf-milter/\n";
+if (not (-e $basedir)) {
+    if (not mkdir $basedir) {
+        print STDERR "Odd; cannot create $basedir/\n";
         exit 1;
     }
 }
 
-# Fork and give us a pid file.
-
-if ($pid = fork ()) {
-    open (USERLOG, ">".'/var/spf-milter/spf-milter.pid') or exit 1;
-    flock (USERLOG, 2);
-    seek (USERLOG, 0, 0);
-    print USERLOG " $pid";
-    close (USERLOG);
-    exit 0;
-}
-
-# Complete de daemonization process.
-
-POSIX::setsid () or exit 1;
-
-open (STDERR, '>&STDOUT');
 
 # The Sendmail::Milter 0.18 engine has a small bug, causing it to extract
 # the wrong socket-name when, next to the F flags, there's an additional flag
@@ -439,7 +584,7 @@ if (not $conn = Sendmail::Milter::auto_getconn ('spf-milter', '/etc/mail/sendmai
 }
 
 if ($conn =~ /^local:(.+)/) {
-    if (not Sendmail::Milter::setconn ('local:/var/spf-milter/spf-milter.sock')) {
+    if (not Sendmail::Milter::setconn ("local:$sock")) {
         log_error_and_exit ("Failed to set connection information!");
     }
 
@@ -467,8 +612,8 @@ if ($conn =~ /^local:(.+)/) {
 
     # Set all proper permissions/ownerships, according to the user we run as.
 
-    if ((not chown $uid, $gid, '/var/spf-milter', glob ('/var/spf-milter/*')) ||
-        (not chmod 0700, '/var/spf-milter')) {
+    if ((not chown $uid, $gid, $basedir, glob ($basedir . '/*')) ||
+        (not chmod 0700, $basedir)) {
         log_error_and_exit ("Cannot set proper permissions!");
     }
 
@@ -481,15 +626,47 @@ if ($conn =~ /^local:(.+)/) {
 
     # Unlink our previous .sock file, should it exist.
 
-    if (-e '/var/spf-milter/spf-milter.sock') {
-        if (not unlink ('/var/spf-milter/spf-milter.sock')) {
-            log_error_and_exit ("Cannot unlink /var/spf-milter/spf-milter.sock!");
+    if (-e $sock) {
+        if (not unlink ($sock)) {
+            log_error_and_exit ("Cannot unlink $sock!");
         }
     }
 
     # Give us a pretty proc-title to look at in 'ps ax'. :)
 
     $0 = 'spf-milter' . (($mx_mode) ? (" [mx mode]") : (""));
+
+    # Fork and give us a pid file.
+    if ($pid = fork ()) {
+	open (USERLOG, ">". $pidFile) or exit 1;
+	flock (USERLOG, 2);
+	seek (USERLOG, 0, 0);
+	print USERLOG " $pid";
+	close (USERLOG);
+
+	# Wait until either milter socket appears or child dies
+	my $kid=0;
+	while (!-x $sock) {
+	    select (undef,undef,undef,0.01);
+	    $kid = waitpid(-1, WNOHANG);
+	    if ($kid > 0) {
+		$pid=0; # trigger cleanup
+		die "Could not start milter\n";
+	    }
+	}
+	exit 0;
+    }
+
+    # Redirect all input/output from/to null
+
+    open (STDIN, '/dev/null');
+    open (STDOUT, '>/dev/null');
+
+    # Complete de daemonization process.
+
+    POSIX::setsid () or exit 1;
+
+    open (STDERR, '>&STDOUT');
 
     if (Sendmail::Milter::main ()) {
         write_log ("Successful exit from the Sendmail::Milter engine");
@@ -505,8 +682,8 @@ END {
     # On exit (child only!) we clean up the mess.
 
     if (not $pid) {
-        unlink ('/var/spf-milter/spf-milter.pid');
-        unlink ('/var/spf-milter/spf-milter.sock');
+        unlink ($pidFile);
+        unlink ($sock);
     }
 }
 
