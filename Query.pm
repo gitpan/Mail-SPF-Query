@@ -5,12 +5,12 @@ package Mail::SPF::Query;
 #
 # 		       Meng Weng Wong
 #		  <mengwong+spf@pobox.com>
-# $Id: Query.pm,v 1.24 2003/12/11 22:56:43 devel Exp $
+# $Id: Query.pm,v 1.27 2003/12/15 22:58:10 devel Exp $
 # test an IP / sender address pair for pass/fail/nodata/error
 #
 # http://spf.pobox.com/
 #
-# this version is compatible with draft-02.9.txt
+# this version is compatible with draft-02.9.4.txt
 #
 # license: opensource.
 #
@@ -48,7 +48,7 @@ my $MAX_RECURSION_DEPTH = 10;
 
 my $Domains_Queried = {};
 
-$VERSION = "1.9.3";
+$VERSION = "1.9.5";
 
 $CACHE_TIMEOUT = 120;
 
@@ -141,6 +141,8 @@ sub new {
 
   if (not length $query->{domain}) { die "unable to identify domain of sender $query->{sender}" }
 
+  $query->{orig_domain} = $query->{domain};
+
   $query->{loop_report} = [$query->{domain}];
 
   ($query->{localpart}) = $query->{sender} =~ /(.+)\@/;
@@ -224,7 +226,7 @@ sub header_comment {
      : $result eq "fail"     ? "domain of $query->{sender} does not designate $ip as permitted sender"
      : $result eq "softfail" ? "transitioning domain of $query->{sender} does not designate $ip as permitted sender"
      : $result eq "error"    ? "error in processing during lookup of $query->{sender}"
-     : $result eq "UNKNOWN"  ? "an error occurred during SPF processing of domain of $query->{sender}"
+     : $result eq "UNKNOWN"  ? "unable to determine SPF status for $query->{sender}"
      : $result =~ /^UNKNOWN/ ? "encountered unrecognized mechanism during SPF processing of domain of $query->{sender}"
      :                         "domain of $query->{sender} does not designate permitted sender hosts" );
 
@@ -544,6 +546,7 @@ sub macro_substitute_item {
     $newval = $query->{localpart}       if (lc $field eq 'l');
     $newval = $query->{domain}          if (lc $field eq 'd');
     $newval = $query->{sender}          if (lc $field eq 's');
+    $newval = $query->{orig_domain}     if (lc $field eq 'o');
     $newval = $query->ip                if (lc $field eq 'i');
     $newval = $timestamp                if (lc $field eq 't');
     $newval = $query->{helo}            if (lc $field eq 'h');
@@ -610,6 +613,8 @@ sub evaluate_mechanism {
   if ({ map { $_=>1 } @KNOWN_MECHANISMS }->{$mechanism}) {
     my $mech_sub = "mech_$mechanism";
     my ($hit, $text) = $query->$mech_sub($query->macro_substitute($argument, 255));
+    no warnings 'uninitialized';
+    $query->debuglog("  evaluate_mechanism: $modifier$mechanism($argument) returned $hit $text");
 
     return if not $hit;
 
@@ -771,11 +776,11 @@ sub mech_mx {
 
   my @mxes = $query->myquery($domain_to_use, "MX", "exchange", "preference");
 
-  # if a domain has no MX record, use its IP address instead.
-  if (! @mxes) {
-    $query->debuglog("  mechanism mx: no MX found for $domain_to_use.  Will pretend it is its own MX, and test its IP address.");
-    @mxes = ($domain_to_use);
-  }
+  # if a domain has no MX record, we MUST NOT use its IP address instead.
+  # if (! @mxes) {
+  #   $query->debuglog("  mechanism mx: no MX found for $domain_to_use.  Will pretend it is its own MX, and test its IP address.");
+  #   @mxes = ($domain_to_use);
+  # }
 
   foreach my $mx (@mxes) {
     # $query->debuglog("  mechanism mx: $mx");
@@ -917,8 +922,8 @@ sub shorthand2value {
   my $shorthand = shift;
   return { "-" => "fail",
 	   "+" => "pass",
-	   "~" => "unknown",
-	   "?" => "unknown" } -> {$shorthand} || $shorthand;
+	   "~" => "UNKNOWN",
+	   "?" => "UNKNOWN" } -> {$shorthand} || $shorthand;
 }
 
 sub value2shorthand {
@@ -987,7 +992,7 @@ sub interpolate_explanation {
 
     return if not $txt;
 
-    my $directive_set = bless { txt => $txt } , $class;
+    my $directive_set = bless { orig_txt => $txt, txt => $txt } , $class;
 
     TXT_RESPONSE:
     for ($txt) {

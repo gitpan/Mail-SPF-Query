@@ -4,7 +4,9 @@ MANIFEST
 Query.pm
 README
 test.pl
+test.txt
 spfd
 spfquery
+sample/postfix-policyd
 sample/sendmail-milter
 sample/exim-acl

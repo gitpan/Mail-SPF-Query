@@ -1,0 +1,381 @@
+#!/usr/bin/perl
+
+# mengwong@pobox.com
+# Wed Dec 10 03:52:04 EST 2003
+# postfix-policyd
+# version 1.0
+# see http://spf.pobox.com/
+
+use DB_File;
+use Fcntl;
+use Sys::Syslog qw(:DEFAULT setlogsock);
+use strict;
+use Mail::SPF::Query;
+
+# ----------------------------------------------------------
+# 		       configuration
+# ----------------------------------------------------------
+
+my @HANDLERS = (
+		"testing",
+		"sender_permitted_from",
+		"greylisting",
+		);
+
+my $VERBOSE = 1;
+
+my @Greylisting_Whitelisted_Senders =
+    (
+     qr(^postmaster)i,
+     );
+
+#
+# Syslogging options for verbose mode and for fatal errors.
+# NOTE: comment out the $syslog_socktype line if syslogging does not
+# work on your system.
+#
+
+my $syslog_socktype = 'unix'; # inet, unix, stream, console
+my $syslog_facility = "mail";
+my $syslog_options  = "pid";
+my $syslog_priority = "info";
+
+#
+# greylist status database and greylist time interval. DO NOT create the
+# greylist status database in a world-writable directory such as /tmp
+# or /var/tmp. DO NOT create the greylist database in a file system
+# that can run out of space.
+#
+# In case of database corruption, this script saves the database as
+# $database_name.time(), so that the mail system does not get stuck.
+#
+my $database_name="/var/spool/postfix/smtpd-policy.db";
+my $GREYLIST_DELAY=60;
+
+# ----------------------------------------------------------
+#		   minimal documentation
+# ----------------------------------------------------------
+
+#
+# Usage: smtpd-policy.pl [-v]
+#
+# Demo delegated Postfix SMTPD policy server. This server
+# implements greylisting and SPF.
+# 
+# State for greylisting is kept in a Berkeley DB database.
+# 
+# The SPF handler uses Mail::SPF::Query to do the heavy lifting.
+# 
+# Logging is sent to syslogd.
+#
+# How it works: each time a Postfix SMTP server process is started
+# it connects to the policy service socket, and Postfix runs one
+# instance of this PERL script.  By default, a Postfix SMTP server
+# process terminates after 100 seconds of idle time, or after serving
+# 100 clients. Thus, the cost of starting this PERL script is smoothed
+# out over time.
+#
+# To run this from /etc/postfix/master.cf:
+#
+#    policy  unix  -       n       n       -       -       spawn
+#      user=nobody argv=/usr/bin/perl /usr/libexec/postfix/smtpd-policy.pl
+#
+# To use this from Postfix SMTPD, use in /etc/postfix/main.cf:
+#
+#    smtpd_recipient_restrictions =
+#	...
+#	reject_unauth_destination
+#	check_policy_service unix:private/policy
+#	...
+#
+# NOTE: specify check_policy_service AFTER reject_unauth_destination
+# or else your system can become an open relay.
+#
+# To test this script by hand, execute:
+#
+#    % perl smtpd-policy.pl
+#
+# Each query is a bunch of attributes. Order does not matter, and
+# the demo script uses only a few of all the attributes shown below:
+#
+#    request=smtpd_access_policy
+#    protocol_state=RCPT
+#    protocol_name=SMTP
+#    helo_name=some.domain.tld
+#    queue_id=8045F2AB23
+#    sender=foo@bar.tld
+#    recipient=bar@foo.tld
+#    client_address=1.2.3.4
+#    client_name=another.domain.tld
+#    [empty line]
+#
+# The policy server script will answer in the same style, with an
+# attribute list followed by a empty line:
+#
+#    action=dunno
+#    [empty line]
+#
+
+# Jul 23 18:43:29 dumbo/dumbo policyd[21171]: Attribute: client_address=208.210.125.227
+# Jul 23 18:43:29 dumbo/dumbo policyd[21171]: Attribute: client_name=newbabe.mengwong.com
+# Jul 23 18:43:29 dumbo/dumbo policyd[21171]: Attribute: helo_name=newbabe.mengwong.com
+# Jul 23 18:43:29 dumbo/dumbo policyd[21171]: Attribute: protocol_name=ESMTP
+# Jul 23 18:43:29 dumbo/dumbo policyd[21171]: Attribute: protocol_state=RCPT
+# Jul 23 18:43:29 dumbo/dumbo policyd[21171]: Attribute: queue_id=
+# Jul 23 18:43:29 dumbo/dumbo policyd[21171]: Attribute: recipient=mengwong@dumbo.pobox.com
+# Jul 23 18:43:29 dumbo/dumbo policyd[21171]: Attribute: request=smtpd_access_policy
+# Jul 23 18:43:29 dumbo/dumbo policyd[21171]: Attribute: sender=mengwong@newbabe.mengwong.com
+
+# ----------------------------------------------------------
+# 		       initialization
+# ----------------------------------------------------------
+
+#
+# Log an error and abort.
+#
+sub fatal_exit {
+  syslog(err  => "fatal_exit: @_");
+  syslog(warn => "fatal_exit: @_");
+  syslog(info => "fatal_exit: @_");
+  die "fatal: @_";
+}
+
+#
+# Unbuffer standard output.
+#
+select((select(STDOUT), $| = 1)[0]);
+
+#
+# Signal 11 means that we have some kind of database corruption (yes
+# Berkeley DB should handle this better).  Move the corrupted database
+# out of the way, and start with a new database.
+#
+sub sigsegv_handler {
+  my $backup = $database_name . "." . time();
+
+  rename $database_name, $backup || fatal_exit ("Can't save $database_name as $backup): $!");
+  fatal_exit ("Caught signal 11; the corrupted database is saved as $backup");
+}
+
+$SIG{'SEGV'} = 'sigsegv_handler';
+
+#
+# This process runs as a daemon, so it can't log to a terminal. Use
+# syslog so that people can actually see our messages.
+#
+setlogsock $syslog_socktype;
+openlog $0, $syslog_options, $syslog_facility;
+
+# ----------------------------------------------------------
+# 			    main
+# ----------------------------------------------------------
+
+#
+# Receive a bunch of attributes, evaluate the policy, send the result.
+#
+my %attr;
+while (<STDIN>) {
+  chomp;
+  if (/=/)       { my ($k, $v) = split (/=/, $_, 2); $attr{$k} = $v; next }
+  elsif (length) { syslog(warn=>sprintf("warning: ignoring garbage: %.100s", $_)); next; }
+
+  if ($VERBOSE) {
+    for (sort keys %attr) {
+      syslog(debug=> "Attribute: %s=%s", $_, $attr{$_});
+    }
+  }
+
+  fatal_exit ("unrecognized request type: '$attr{request}'") unless $attr{request} eq "smtpd_access_policy";
+
+  my $action = "ok";
+  my %responses;
+  foreach my $handler (@HANDLERS) {
+    no strict 'refs';
+    my $response = $handler->(attr=>\%attr);
+    syslog(debug=> "handler %s: %s", $handler, $response);
+    if ($response !~ /^(ok|dunno)/i) {
+      
+      syslog(info=> "handler %s: %s is decisive.", $handler, $response);
+      $action = $response; last;
+    }
+  }
+
+  syslog(info=> "decided action=%s", $action);
+
+  print STDOUT "action=$action\n\n";
+  %attr = ();
+}
+
+# ----------------------------------------------------------
+# 		      plugin: SPF
+# ----------------------------------------------------------
+sub sender_permitted_from {
+  local %_ = @_;
+  my %attr = %{ $_{attr} };
+
+  my $query = new Mail::SPF::Query (ip    =>$attr{client_address},
+				    sender=>$attr{sender},
+				    helo  =>$attr{helo_name});
+  my ($result, $smtp_comment, $header_comment) = $query->result();
+
+  syslog(info=>"%s: SPF %s: smtp_comment=%s, header_comment=%s",
+	 $attr{queue_id}, $result, $smtp_comment, $header_comment); 
+
+  if    ($result eq "pass")  { return "DUNNO"; }
+  elsif ($result eq "fail")  { return "REJECT " . ($smtp_comment || $header_comment); }
+  elsif ($result eq "error") { return "DUNNO"; }
+  else                       { return "DUNNO"; }
+
+  # TODO XXX: prepend Received-SPF header.
+}
+
+# ----------------------------------------------------------
+# 		      plugin: testing
+# ----------------------------------------------------------
+sub testing {
+  local %_ = @_;
+  my %attr = %{ $_{attr} };
+
+  if (lc address_stripped($attr{sender}) eq
+      lc address_stripped($attr{recipient})
+      and
+      $attr{recipient} =~ /policyblock/) {
+
+    syslog(info=>"%s: testing: will block as requested",
+	   $attr{queue_id}); 
+    return "REJECT smtpd-policy blocking $attr{recipient}";
+  }
+  else {
+    syslog(info=>"%s: testing: stripped sender=%s, stripped rcpt=%s",
+	   $attr{queue_id},
+	   address_stripped($attr{sender}),
+	   address_stripped($attr{recipient}),
+	   ); 
+    
+  }
+  return "DUNNO";
+}
+
+sub address_stripped {
+  # my $foo = localpart_lhs('foo+bar@baz.com'); # returns 'foo@baz.com'
+  my $string = shift;
+  for ($string) {
+    s/[+-].*\@/\@/;
+  }
+  return $string;
+}
+
+# ----------------------------------------------------------
+# 		      plugin: greylisting
+# ----------------------------------------------------------
+
+my $Database_Obj;
+my %DB_Hash;
+
+#
+# Demo SMTPD access policy routine. The result is an action just like
+# it would be specified on the right-hand side of a Postfix access
+# table.  Request attributes are available via the %attr hash.
+#
+sub greylisting {
+    local %_ = @_;
+    my %attr = %{ $_{attr} };
+
+    my($key, $time_stamp, $now);
+
+    return "DUNNO" if grep { $attr{sender} =~ $_ } @Greylisting_Whitelisted_Senders;
+
+    # Open the database on the fly.
+    open_database() unless $Database_Obj;
+
+    # Lookup the time stamp for this client/sender/recipient.
+    $key = lc join "/", @attr{qw( client_address sender recipient )};
+    $time_stamp = read_database($key);
+    $now = time();
+
+    # If this is a new request add this client/sender/recipient to the database.
+    if ($time_stamp == 0) {
+	$time_stamp = $now;
+	update_database($key, $time_stamp);
+    }
+
+    # In case of success, return DUNNO instead of OK so that the
+    # check_policy_service restriction can be followed by other restrictions.
+    # In case of failure, specify DEFER_IF_PERMIT so that mail can
+    # still be blocked by other access restrictions.
+    syslog $syslog_priority, "request age %d", $now - $time_stamp if $VERBOSE;
+    if ($now - $time_stamp > $GREYLIST_DELAY) {
+      syslog(debug=> "handler %s: %s showed up in the database more than $GREYLIST_DELAY seconds ago.",
+	     "greylisting", $key);
+      return "dunno";
+    } else {
+      syslog(debug=> "handler %s: %s has not been in the database $GREYLIST_DELAY seconds.  denying.",
+	     "greylisting", $key);
+      return "defer_if_permit Greylisting delay; please try again after $GREYLIST_DELAY seconds.";
+    }
+}
+
+#
+# You should not have to make changes below this point.
+#
+sub LOCK_SH { 1 };	# Shared lock (used for reading).
+sub LOCK_EX { 2 };	# Exclusive lock (used for writing).
+sub LOCK_NB { 4 };	# Don't block (for testing).
+sub LOCK_UN { 8 };	# Release lock.
+
+#
+# Open hash database.
+#
+sub open_database {
+    my($database_fd);
+
+    # Use tied database to make complex manipulations easier to express.
+    $Database_Obj = tie(%DB_Hash, 'DB_File', $database_name,
+			    O_CREAT|O_RDWR, 0644, $DB_BTREE) ||
+	fatal_exit "Cannot open database %s while running as $>: $!", $database_name;
+    $database_fd = $Database_Obj->fd;
+    open DATABASE_HANDLE, "+<&=$database_fd" ||
+	fatal_exit "Cannot fdopen database %s: $!", $database_name;
+    syslog $syslog_priority, "open %s", $database_name if $VERBOSE;
+}
+
+#
+# Read database. Use a shared lock to avoid reading the database
+# while it is being changed. XXX There should be a way to synchronize
+# our cache from the on-file database before looking up the key.
+#
+sub read_database {
+    my($key) = @_;
+    my($value);
+
+    flock DATABASE_HANDLE, LOCK_SH ||
+	fatal_exit "Can't get shared lock on %s: $!", $database_name;
+    # XXX Synchronize our cache from the on-disk copy before lookup.
+    $value = $DB_Hash{$key};
+    syslog $syslog_priority, "lookup %s: %s", $key, $value if $VERBOSE;
+    flock DATABASE_HANDLE, LOCK_UN ||
+	fatal_exit "Can't unlock %s: $!", $database_name;
+    return $value;
+}
+
+#
+# Update database. Use an exclusive lock to avoid collisions with
+# other updaters, and to avoid surprises in database readers. XXX
+# There should be a way to synchronize our cache from the on-file
+# database before updating the database.
+#
+sub update_database {
+    my($key, $value) = @_;
+
+    syslog $syslog_priority, "store %s: %s", $key, $value if $VERBOSE;
+    flock DATABASE_HANDLE, LOCK_EX ||
+	fatal_exit "Can't exclusively lock %s: $!", $database_name;
+    # XXX Synchronize our cache from the on-disk copy before update.
+    $DB_Hash{$key} = $value;
+    $Database_Obj->sync() &&
+	fatal_exit "Can't update %s: $!", $database_name;
+    flock DATABASE_HANDLE, LOCK_UN ||
+	fatal_exit "Can't unlock %s: $!", $database_name;
+}
+
+
