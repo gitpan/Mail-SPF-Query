@@ -1,6 +1,4 @@
-#!/icg/bin/perl -sw
-
-# you probably want to change the above line to /usr/bin/perl
+#!/usr/bin/perl -sw
 
 eval 'exec /usr/local/bin/perl -sw -S $0 ${1+"$@"}'
     if 0; # not running under some shell
@@ -9,24 +7,69 @@ eval 'exec /usr/local/bin/perl -sw -S $0 ${1+"$@"}'
 # mengwong+spf@pobox.com
 # Tue Oct 28 00:46:44 EST 2003
 # 
+# if you're reading source code, you should probably be on spf-devel@listbox.com.
+# 
 # echo "ip=IP\nhelo=HELOHOST\nsender=EMAILADDRESS\n" | nc localhost 5970
 #
 # or use Mail::Postfix::Attr to query spfd over a unix domain socket.
 #
-# ./spfd -port=5970		# inet socket
-# ./spfd -path=/var/spfd	# unix domain socket
-# [-user=(uid|username)]	#setuid user for process if using inet socket
-#				# or chown if using unix-socket 	
-# [-group=(gid|groupname)]	# as above, but with group
+# SYNOPSIS
+#    spfd [OPTION]...
+#
+# DEFAULT
+#    spfd -port=5970
+#
+# OPTIONS
+#    -port=PORTNUM
+#        Listen with a tcp socket on port PORTNUM (mutually exlusive with -path)
+#
+#    -path=FILESPEC
+#        Listen with a unix socket at FILESPEC (mutually exlusive with -port)
+#
+#    -pathuser=USER
+#        When using a unix socket set owner to USER
+#
+#    -pathgroup=GROUP
+#        When using a unix socket set group to GROUP
+#
+#    -pathmode=MODE
+#        When using a unix socket set socket permissions to MODE (octal)
+#
+#    -setuser=(uid|username)
+#        Drop privileges to uid or username after opening the socket
+#
+#    -setgroup=(gid|groupname)
+#        Drop privileges to gid or groupname after opening the socket
+#
+
+# example usage
+#    
+#    20040113-22:39:24 mengwong@dumbo:~% echo "ip=208.210.125.24\nhelo=moo.com\nsender=mengwong@vw.mailzone.com\n" | nc localhost 5970
+#    result=fail
+#    smtp_comment=please see http://spf.pobox.com/why.html?sender=mengwong%40vw.mailzone.com&ip=208.210.125.24&receiver=dumbo.pobox.com
+#    header_comment=dumbo.pobox.com: domain of mengwong@vw.mailzone.com does not designate 208.210.125.24 as permitted sender
+#    guess=pass
+#    smtp_guess=vw.mailzone.com MX dumbo.pobox.com A 208.210.125.24
+#    header_guess=seems reasonable for mengwong@vw.mailzone.com to mail through 208.210.125.24
+#    guess_tf=pass
+#    smtp_tf=dumbo.pobox.com.wl.trusted-forwarder.org found
+#    header_tf=seems reasonable for mengwong@vw.mailzone.com to mail through 208.210.125.24
+#    spf_record=v=spf1 mx:vw.com ptr:vw.com ptr:monkey.org -all
+# 
+#  the three sets of results correspond to ->result(), ->best_guess(), and ->trusted_forwarder()
+#  in Mail::SPF::Query.
+# 
 
 use Mail::SPF::Query;
 use Socket;
 
 use strict;
-use vars qw($port $path $group $user);
+use vars qw($port $path $pathuser $pathgroup $pathmode $setuser $setgroup);
 
+# FIXME
 sub usage () {
-  print "usage: spfd ( -port=5970 | -path=/var/spfd ) [-user=(uid|username)] [-group=(gid|groupname)]\n";
+  print "usage: spfd ( -port=5970 | -path=/var/spfd ) [-setuser=(uid|username)] [-setgroup=(gid|groupname)]\n";
+  print "usage:      [ -pathuser=(uid|username)] [ -pathgroup=(gid|groupname)] [-pathmode=mode]\n";
   print "usage: spfd assuming -port=5970\n";
 }
 
@@ -40,28 +83,6 @@ if (not $port and not $path) {
 if ($port and $path) {
   usage;
   exit 1;
-}
-
-if ($group =~ /\D/) {
-  $group = getgrnam($group) || die "Group: $group not found\n";
-}
-
-if ($port and $group) {
-  $( = $) = $group;
-  unless ($( == $) and $( == $group) {
-    die( "setgid($group) call failed: $!\n" );
-  }
-}
-
-if ($user =~ /\D/) {
-  $user = getpwnam($user) || die "User: $user not found\n"; 
-}
-
-if ($port and $user) {
-   $< = $> = $user;
-   unless ($< == $> and $< == $user) {
-    die( "setuid($user) call failed: $!\n" );
-  }
 }
 
 $|++;
@@ -91,17 +112,50 @@ if ($port) {
 print "$$: creating server with args @args\n";
 
 my $server = $sock_type eq "inet" ? IO::Socket::INET->new(@args) : IO::Socket::UNIX->new(@args);
-if ($path) {
-	if ($group and $user) {
-		chown $user, $group, $path or die "Cannot chown $user, $group on $path -- $!";
 
-	} elsif ($user) {
-		chown $user, -1, $path or die "Cannot chown $user on $path -- $!";
-	}
-	# fixup perms so that our user/group can read/write to the unix socket
-	chmod 0660, $path or die "Cannot fixup perms on $path -- $!";
+if ($path) {
+  if (defined $pathuser or defined $pathgroup) {
+    unless ( defined $pathuser ) { $pathuser = -1 }
+    unless ( defined $pathgroup ) { $pathgroup = -1 }
+
+    if ($pathuser =~ /\D/) {
+      $pathuser = getpwnam($pathuser) || die "User: $pathuser not found\n";
+    }
+
+    if ($pathgroup =~ /\D/) {
+      $pathgroup = getgrnam($pathgroup) || die "Group: $pathgroup not found\n";
+    }
+
+    chown $pathuser, $pathgroup, $path or die "chown call failed on $path: $!\n";
+  }
+  if (defined $pathmode) {
+    chmod oct($pathmode), $path or die "Cannot fixup perms on $path -- $!\n";
+  }
 }
+
 DEBUG and print "$$: server is $server\n";
+
+if ($setgroup) {
+  if ($setgroup =~ /\D/) {
+    $setgroup = getgrnam($setgroup) || die "Group: $setgroup not found\n";
+  }
+  $( = $setgroup;
+  $) = $setgroup;
+  unless ($( == $setgroup and $) == $setgroup) {
+    die( "setgid($setgroup) call failed: $!\n" );
+  }
+}
+
+if ($setuser) {
+  if ($setuser =~ /\D/) {
+    $setuser = getpwnam($setuser) || die "User: $setuser not found\n"; 
+  }
+   $< = $setuser;
+   $> = $setuser;
+   unless ($< == $setuser and $> == $setuser) {
+    die( "setuid($setuser) call failed: $!\n" );
+  }
+}
 
 while (my $sock = $server->accept()) {
   if    (fork) { close $sock; wait; next; } # this is the grandfather trick.
@@ -135,19 +189,26 @@ while (my $sock = $server->accept()) {
 
   if ($@) { @a{qw(result smtp_comment header_comment)} = ("unknown", $error, "SPF error: $error"); }
   else {
-    @a{qw(result smtp_comment header_comment)} = $query->result();
-    @a{qw(guess  smtp_guess   header_guess  )} = $query->best_guess();
+    @a{qw(result    smtp_comment header_comment spf_record)} = $query->result();
+    @a{qw(guess     smtp_guess   header_guess  )} = $query->best_guess();
+    @a{qw(guess_tf  smtp_tf      header_tf     )} = $query->trusted_forwarder();
   }
 
   if (DEBUG) {
-    for (qw(result smtp_comment header_comment
-	  guess  smtp_guess   header_guess)) {
+    for (qw(result    smtp_comment header_comment
+	    guess     smtp_guess   header_guess
+            guess_tf  smtp_tf      header_tf
+	    spf_record
+	    )) {
       print "moo!  $_=$a{$_}\n";
     }
   }
 
-  for (qw(result smtp_comment header_comment
-	  guess  smtp_guess   header_guess)) {
+  for (qw(result    smtp_comment header_comment
+	  guess     smtp_guess   header_guess
+          guess_tf  smtp_tf      header_tf
+	  spf_record
+	  )) {
     no warnings 'uninitialized';
     print $sock "$_=$a{$_}\n";
   }

@@ -7,6 +7,8 @@ test.pl
 test.txt
 spfd
 spfquery
-sample/postfix-policyd
+sample/postfix-policyd-spf
 sample/sendmail-milter
 sample/exim-acl
+sample/spf.py
+sample/README

@@ -2,6 +2,10 @@
 #
 # Code by Mark Kramer <admin@asarian-host.net> on December 3, 2003
 #
+# Version 1.2
+#
+# Last revision: January 16, 2004
+#
 # Tested under Perl, v5.8.0 built for i386-freebsd-thread-multi,
 # using the Sendmail::Milter 0.18 engine.
 #
@@ -11,8 +15,8 @@
 #
 # availability: bundled with Mail::SPF::Query on CPAN
 #               or at http://spf.pobox.com/downloads.html
-# 
-# this version is compatible with SPF draft 02.9.3.
+#
+# this version is compatible with SPF draft 02.9.4.
 #
 
 # ----------------------------------------------------------
@@ -20,9 +24,11 @@
 # ----------------------------------------------------------
 
 # where do we log SPF activity?
+
 my $SPF_LOG_FILENAME = POSIX::strftime("/var/spf-milter/spflog-%Y%m.log", localtime);
 
 # do we feel a need to flock the SPF logfile?
+
 use constant FLOCK_SPFLOG => 0;
 
 # ----------------------------------------------------------
@@ -33,7 +39,10 @@ use POSIX;
 use Sendmail::Milter;
 use Socket;
 use Mail::SPF::Query;
+use threads;
+use threads::shared;
 use strict;
+my $mx_mode : shared = 0;
 
 my ($conn, $user, $pid, $login, $pass, $uid, $gid);
 
@@ -42,8 +51,8 @@ my ($conn, $user, $pid, $login, $pass, $uid, $gid);
 sub write_log : locked {
     open  (SPFLOG, "+>>".$SPF_LOG_FILENAME) || (warn "$0: unable to write to $SPF_LOG_FILENAME: $!" && return);
     if (FLOCK_SPFLOG) {
-      flock (SPFLOG, 2);
-      seek  (SPFLOG, 0, 2);
+        flock (SPFLOG, 2);
+        seek  (SPFLOG, 0, 2);
     }
     print  SPFLOG localtime () . ": @_\n";
     close (SPFLOG);
@@ -103,13 +112,31 @@ sub socket_call : locked {
         # from best_guess, prior to "Sunrise Date", is too rich for my blood.
 
         my $priv_data = shift;
+
         if (my $query = eval {new Mail::SPF::Query (ip => shift, sender => shift, helo => shift)}) {
-            my ($result, $smtp_comment, $header_comment);
-            if (eval {($result, $smtp_comment, $header_comment) = $query->result()}) {
+            my ($call_status, $result, $smtp_comment, $header_comment, $spf_record);
+
+            # In "mx" mode, we make a call to result2(), instead of to result(),
+            # to which we parse an extra parameter, $priv_data->{'to'}, so
+            # result2() can check against secondaries for the recipent.
+
+            if ($mx_mode) {
+                $call_status = eval {($result, $smtp_comment, $header_comment, $spf_record) = $query->result2(shift)};
+            } else {
+                $call_status = eval {($result, $smtp_comment, $header_comment) = $query->result()};
+            }
+
+            if ($call_status) {
 
                 # Return $smtp_comment, if defined, else the prefab $header_comment.
 
                 $smtp_comment ||= $header_comment;
+
+                # Need to escape unprotected % characters in spf_smtp_comment,
+                # or sendmail will use the default "Command rejected" message instead.
+                # Noted by Paul Howarth
+
+                $smtp_comment =~ s/%/%%/g;
 
                 # Since $smtp_comment can be whatever is returned, we consider it highly
                 # tainted, and first run it through a 'garbage' filter, so as to clear it
@@ -150,6 +177,10 @@ sub connect_callback : locked {
     $priv_data->{'hostname'} = shift;
     my $sockaddr_in = shift;
     $priv_data->{'ipaddr'} = socket_call ((defined $sockaddr_in), $sockaddr_in);
+
+    # Our hostname can be extracted from the j macro; idea by Alain Knaff
+
+    $priv_data->{'our_hostname'} = $ctx -> getsymval ('j');
     $ctx->setpriv($priv_data);
     return SMFIS_CONTINUE;
 }
@@ -166,32 +197,99 @@ sub envfrom_callback : locked {
     my $ctx = shift;
     my $priv_data = $ctx->getpriv();
    ($priv_data->{'from'} = lc (shift)) =~ s/[<>]//g;
+    $priv_data->{'is_authenticated'} = $ctx -> getsymval ('{auth_authen}');
 
     # envfrom_callback can be called more than once within the same connection;
     # delete $priv_data->{'spf_result'} on entry!
 
     delete $priv_data->{'spf_result'};
 
+    # SASL authenticated IP addresses always pass!
+    #
+    # Be sure to add the following lines to your sendmail.cf, or SMTP AUTH
+    # parameters (amongst others) are not parsed!
+    #
+    # O Milter.LogLevel=9
+    # O Milter.macros.connect=j, _, {daemon_name}, {if_name}, {if_addr}
+    # O Milter.macros.helo={tls_version}, {cipher}, {cipher_bits}, {cert_subject}, {cert_issuer}
+    # O Milter.macros.envfrom=i, {auth_type}, {auth_authen}, {mail_mailer}, {mail_host}, {mail_addr}
+    # O Milter.macros.envrcpt={rcpt_mailer}, {rcpt_host}, {rcpt_addr}
+
+    if ($priv_data->{'is_authenticated'}) {
+	$priv_data->{'spf_result'} = "pass";
+	$priv_data->{'spf_header_comment'} = "$priv_data->{'our_hostname'}: domain of $priv_data->{'from'} designates $priv_data->{'ipaddr'} as SASL permitted sender";
+	$ctx -> setpriv ($priv_data);
+	return SMFIS_CONTINUE;
+    }
+
     $ctx->setpriv($priv_data);
 
     # Do the Milter equivalent of "PrivacyOptions=needmailhelo". Needed for SPF.
 
     if (not $priv_data->{'helo'}) {
-        $ctx->setreply('503', '5.5.1', "Need HELO before MAIL");
+        $ctx->setreply('503', '5.0.0', "Need HELO before MAIL");
         return SMFIS_REJECT;
+    }
+
+    # Did we start in "mx" mode? If so, we will delay SPF checks until
+    # envrcpt_callback.
+
+    return SMFIS_CONTINUE if ($mx_mode);
 
     # Make the SPF query, and immediately store the result in our private hash;
     # we may also need it later, at eom_callback.
 
-    } elsif ($priv_data->{'spf_result'} = socket_call (2, $priv_data, $priv_data->{'ipaddr'}, $priv_data->{'from'}, $priv_data->{'helo'})) {
+    if ($priv_data->{'spf_result'} = socket_call (2, $priv_data, $priv_data->{'ipaddr'}, $priv_data->{'from'}, $priv_data->{'helo'})) {
         if ($priv_data->{'spf_result'} eq 'fail') {
             $ctx->setreply('550', '5.7.1', "[$priv_data->{'spf_smtp_comment'}]; see: http://spf.pobox.com/why.html?sender=$priv_data->{'from'}&ip=$priv_data->{'ipaddr'}");
             return SMFIS_REJECT;
         } elsif ($priv_data->{'spf_result'} eq 'error') {
             $ctx->setreply('451', '4.7.1', "An error occurred during SPF processing of $priv_data->{'from'}. Please try again later");
-            return SMFIS_REJECT;
+            return SMFIS_TEMPFAIL;
         }
     }
+
+    $ctx -> setpriv ($priv_data);
+    return SMFIS_CONTINUE;
+}
+
+sub envrcpt_callback : locked {
+    my $ctx = shift;
+    my $priv_data = $ctx->getpriv();
+
+    # After envrcpt_callback we no longer need the recipient names,
+    # so we can 'close' our data-set immediately.
+
+    $ctx->setpriv($priv_data);
+
+    # Here we do the opposite check of envfrom_callback: if not "mx" mode,
+    # we bale rightaway.
+
+    return SMFIS_CONTINUE if (not $mx_mode);
+
+    # Same deal if we were already authenticated.
+
+    return SMFIS_CONTINUE if ($priv_data->{'is_authenticated'});
+
+   ($priv_data->{'to'} = lc (shift)) =~ s/[<>]//g;
+
+    # We also need to purge $priv_data->{'spf_result'} for each recipient!
+
+    delete $priv_data->{'spf_result'};
+
+    $ctx->setpriv($priv_data);
+
+    if ($priv_data->{'spf_result'} = socket_call (2, $priv_data, $priv_data->{'ipaddr'}, $priv_data->{'from'}, $priv_data->{'helo'}, $priv_data->{'to'})) {
+        if ($priv_data->{'spf_result'} eq 'fail') {
+            $ctx->setreply('550', '5.7.1', "[$priv_data->{'spf_smtp_comment'}]; see: http://spf.pobox.com/why.html?sender=$priv_data->{'from'}&ip=$priv_data->{'ipaddr'}");
+            return SMFIS_REJECT;
+        } elsif ($priv_data->{'spf_result'} eq 'error') {
+            $ctx->setreply('451', '4.7.1', "An error occurred during SPF processing of $priv_data->{'from'}. Please try again later");
+            return SMFIS_TEMPFAIL;
+        }
+    }
+
+    $ctx -> setpriv ($priv_data);
     return SMFIS_CONTINUE;
 }
 
@@ -224,6 +322,7 @@ my %my_callbacks =
     'connect' => \&connect_callback,
     'helo'    => \&helo_callback,
     'envfrom' => \&envfrom_callback,
+    'envrcpt' => \&envrcpt_callback,
     'eom'     => \&eom_callback,
     'close'   => \&close_callback,
     'abort'   => \&close_callback,
@@ -233,18 +332,27 @@ my %my_callbacks =
 # Main code
 
 # We start spf-milter as root for the same reason we do NOT run spf-milter
-# as root: security. And we start it with only one parameter, the user
+# as root: security. And we start it with at least one parameter, the user
 # to run as. Spf-milter expects to create/read/write its log, pid, and socket,
 # all in /var/spf-milter/, and will itself create the directory, if need be,
 # and set all appropriate permissions/ownerships.
+#
+# Add "mx" as second parameter to run spf-milter in "mx" mode. In "mx" mode
+# spf-milter makes its SPF checks at envrcpt_callback, instead of envfrom_callback,
+# and calls result2(), instead of result(), to allow for an early-out for
+# secondaries.
+#
+# The default mode performs SPF checks at envfrom_callback.
 
 if (not $user = lc ($ARGV[0])) {
-    print "Usage: perl $0 <user_to_run_as>\n";
+    print "Usage: perl $0 <user_to_run_as> [mx]\n";
     exit 1;
 } elsif ($>) {
     print "You need to start spf-milter as root!\n";
     exit 1;
 }
+
+$mx_mode = 1 if (lc ($ARGV[1]) eq 'mx');
 
 # Since we will daemonize, play nice.
 
@@ -343,7 +451,7 @@ if ($conn =~ /^local:(.+)/) {
 
     # Give us a pretty proc-title to look at in 'ps ax'. :)
 
-    $0 = 'spf-milter: Sendmail::Milter';
+    $0 = 'spf-milter' . (($mx_mode) ? (" [mx mode]") : (""));
 
     if (Sendmail::Milter::main ()) {
         write_log ("Successful exit from the Sendmail::Milter engine");

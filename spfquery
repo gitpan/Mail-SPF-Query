@@ -1,11 +1,11 @@
-#!/icg/bin/perl -sw-
+#!/usr/bin/perl -sw-
 
 # ----------------------------------------------------------
 # 			  spfquery
 #
 # 		       Meng Weng Wong
 #		  <mengwong+spf@pobox.com>
-# $Id: spfquery,v 1.3 2003/11/29 21:34:20 devel Exp $
+# $Id: spfquery,v 1.4 2004/01/09 23:52:06 devel Exp $
 # test an IP / helo / sender address tuple for pass/fail/softfail/unknown/error
 #
 # usage:
@@ -63,7 +63,7 @@ if (exists $Query{ipv4}) {
   
   my $spfquery = new Mail::SPF::Query (%Query, debug=>$debug, fallbacks => \@Fallbacks);
       
-  my ($passfail, $smtp_comment, $header_comment) = $spfquery->result;
+  my ($passfail, $smtp_comment, $header_comment, $spf_record) = $spfquery->result;
   print STDERR "result=$passfail" . ($smtp_comment ? ": $smtp_comment" : "") . "\n" unless defined $q;
   print "Received-SPF: $passfail ($header_comment)\n" unless defined $q;
 

@@ -332,6 +332,64 @@
 # '105.spf1-test.mailzone.com:v=spf1      redirect=106.%{d3}:60
 # '106.spf1-test.mailzone.com:v=spf1      redirect=107.%{d3}:60
 # '107.spf1-test.mailzone.com:v=spf1       include\072104.%{d3}:60
-126,127,128	droid@104.spf1-test.mailzone.com	192.0.2.98	unknown	loop encountered: 104.spf1-test.mailzone.com redirects to 105.spf1-test.mailzone.com redirects to 106.spf1-test.mailzone.com redirects to 107.spf1-test.mailzone.com includes 104.spf1-test.mailzone.com	unable to determine SPF status for droid@104.spf1-test.mailzone.com
+126,127,128	droid@104.spf1-test.mailzone.com	192.0.2.98	unknown	SPF record error: loop encountered: 104.spf1-test.mailzone.com redirects to 105.spf1-test.mailzone.com redirects to 106.spf1-test.mailzone.com redirects to 107.spf1-test.mailzone.com includes 104.spf1-test.mailzone.com	unable to determine SPF status for droid@104.spf1-test.mailzone.com
 
-129,130,131	droid@110.spf1-test.mailzone.com	192.0.2.98	unknown some:unrecognized=mechanism	unrecognized mechanism some	encountered unrecognized mechanism during SPF processing of domain of droid@110.spf1-test.mailzone.com
+129,130,131	droid@110.spf1-test.mailzone.com	192.0.2.98	unknown some:unrecognized=mechanism	SPF record error: unrecognized mechanism some:unrecognized=mechanism	encountered unrecognized mechanism during SPF processing of domain of droid@110.spf1-test.mailzone.com
+
+# the following tests are for Mail::SPF::Query's result2 and message_result2 methods only.
+
+132,133,134   20.spf1-test.mailzone.com  192.0.2.33          foo@bar.com=fail,foo@spf1-test.mailzone.com=fail,fail
+135,136,137,138	20.spf1-test.mailzone.com	192.0.2.33	foo@spf1-test.mailzone.com=pass,foo@bar.com=fail,fail	.	domain of 20.spf1-test.mailzone.com does not designate 192.0.2.33 as permitted sender
+139,140,141	20.spf1-test.mailzone.com	192.0.2.33	foo@spf1-test.mailzone.com=pass,pass	.	message received from 192.0.2.33 which is an MX secondary for foo@spf1-test.mailzone.com
+142,143   20.spf1-test.mailzone.com  192.0.2.33          foo@bar.com=fail,fail
+144,145,146   20.spf1-test.mailzone.com  192.0.2.34          foo@spf1-test.mailzone.com=fail,foo@bar.com=fail,fail
+147,148,149 20.spf1-test.mailzone.com       192.0.2.120     dog@cat.com=pass,foo@bar.com=pass,pass
+150,151 20.spf1-test.mailzone.com       192.0.2.120     dog@cat.com;foo@bar.com=pass,pass
+152,153,154	20.spf1-test.mailzone.com	192.0.2.33	foo@spf1-test.mailzone.com;foo@bar.com=fail,fail	.	domain of 20.spf1-test.mailzone.com does not designate 192.0.2.33 as permitted sender
+155,156,157	20.spf1-test.mailzone.com	192.0.2.33	foo@bar.com;foo@spf1-test.mailzone.com=fail,fail	.	domain of 20.spf1-test.mailzone.com does not designate 192.0.2.33 as permitted sender
+
+# tests for localpolicy overrides
+
+158 103.spf1-test.mailzone.com:-all  192.0.2.98    pass 
+
+159,160,161	20.spf1-test.mailzone.com:+all	192.0.2.1	pass	/./	local policy designates 192.0.2.1 as permitted sender
+162,163,164	20.spf1-test.mailzone.com:+ip4:192.0.2.1	192.0.2.1	pass	/./	local policy designates 192.0.2.1 as permitted sender
+165 20.spf1-test.mailzone.com:+ip4:192.0.2.2    192.0.2.1           fail 
+
+# '91.spf1-test.mailzone.com:v=spf1 -ip4\072192.0.2.128/25 ip4\072192.0.2.0/24 -all:60
+166 91.spf1-test.mailzone.com:ip4:192.168.1.0/24    192.168.1.1       pass
+167 91.spf1-test.mailzone.com:-ip4:192.0.0.0/8    192.0.2.127       pass
+168 91.spf1-test.mailzone.com:ip4:192.0.0.0/8    192.0.2.129       fail
+
+# '92.spf1-test.mailzone.com:v=spf1 ?ip4\072192.0.2.192/26 ip4\072192.0.2.128/25 -ip4\072192.0.2.0/24 -all:60
+169 92.spf1-test.mailzone.com:+all    192.168.2.1       pass
+170 92.spf1-test.mailzone.com:+all    192.0.2.1       pass
+171 92.spf1-test.mailzone.com:-all    192.0.2.129       pass
+172 92.spf1-test.mailzone.com:-all    192.0.2.193       unknown
+
+# '100.spf1-test.mailzone.com:v=spf1      redirect=98.spf1-test.mailzone.com:60
+173 100.spf1-test.mailzone.com:+all  192.0.2.1     pass
+174 100.spf1-test.mailzone.com:-all  192.0.2.98    pass
+
+# '101.spf1-test.mailzone.com:v=spf1 -all redirect=98.spf1-test.mailzone.com:60
+175 101.spf1-test.mailzone.com:+all  192.0.2.98    fail
+
+# '102.spf1-test.mailzone.com:v=spf1 ?all redirect=98.spf1-test.mailzone.com:60
+176 102.spf1-test.mailzone.com:+all  192.0.2.98    unknown
+
+# '51.spf1-test.mailzone.com:v=spf1 include\07242.spf1-test.mailzone.com                  -all:60
+# '10.spf1-test.mailzone.com:v=spf1 mx                                          -all:60
+177,178,179	10.spf1-test.mailzone.com:include:42.%{d3}	192.0.2.200	fail	explanation: default	domain of 10.spf1-test.mailzone.com does not designate 192.0.2.200 as permitted sender
+180,181,182	10.spf1-test.mailzone.com:include:42.%{d3} +all	192.0.2.200	pass	/./	local policy designates 192.0.2.200 as permitted sender
+183,184,185	10.spf1-test.mailzone.com:include:42.%{d3} +all	192.0.2.110	pass	/./	SPF record at 42.spf1-test.mailzone.com designates 192.0.2.110 as permitted sender
+
+186,187,188	42-27@10.spf1-test.mailzone.com:include:%{l1r-}.%{d3} +all	192.0.2.110	pass	/./	SPF record at 42.spf1-test.mailzone.com designates 192.0.2.110 as permitted sender
+189,190,191	42-27@10.spf1-test.mailzone.com:include:%{l1r0-9}.%{d3} +all	192.0.2.110	pass	/./	SPF record at 42.spf1-test.mailzone.com designates 192.0.2.110 as permitted sender
+192,193,194	42-27@10.spf1-test.mailzone.com:include:%{l1r^-}.%{d3} +all	192.0.2.110	pass	/./	SPF record at 42.spf1-test.mailzone.com designates 192.0.2.110 as permitted sender
+195,196,197	42di27@10.spf1-test.mailzone.com:include:%{l1r:digit:}.%{d3} +all	192.0.2.110	pass	/./	SPF record at 42.spf1-test.mailzone.com designates 192.0.2.110 as permitted sender
+198,199,200	42\07227@10.spf1-test.mailzone.com:include:%{l1r:digit:}.%{d3} +all	192.0.2.110	pass	/./	SPF record at 42.spf1-test.mailzone.com designates 192.0.2.110 as permitted sender
+201,202,203	42\07227@10.spf1-test.mailzone.com:include:%{l1r$foo:}.%{d3} +all	192.0.2.110	pass	/./	SPF record at 42.spf1-test.mailzone.com designates 192.0.2.110 as permitted sender
+204,205,206	42\27@10.spf1-test.mailzone.com:include:%{l1r$fo\o:}.%{d3} +all	192.0.2.110	pass	/./	SPF record at 42.spf1-test.mailzone.com designates 192.0.2.110 as permitted sender
+207,208,209	42-27@10.spf1-test.mailzone.com:include:%{l1r-[]}.%{d3} +all	192.0.2.110	pass	/./	SPF record at 42.spf1-test.mailzone.com designates 192.0.2.110 as permitted sender
+210,211,212	42327@10.spf1-test.mailzone.com:include:%{l1r-[]3}.%{d3} +all	192.0.2.110	pass	/./	SPF record at 42.spf1-test.mailzone.com designates 192.0.2.110 as permitted sender
+
