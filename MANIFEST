@@ -6,3 +6,5 @@ README
 test.pl
 spfd
 spfquery
+sample/sendmail-milter
+sample/exim-acl

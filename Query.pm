@@ -5,7 +5,7 @@ package Mail::SPF::Query;
 #
 # 		       Meng Weng Wong
 #		  <mengwong+spf@pobox.com>
-# $Id: Query.pm,v 1.20 2003/11/30 08:57:59 devel Exp $
+# $Id: Query.pm,v 1.24 2003/12/11 22:56:43 devel Exp $
 # test an IP / sender address pair for pass/fail/nodata/error
 #
 # http://spf.pobox.com/
@@ -15,6 +15,12 @@ package Mail::SPF::Query;
 # license: opensource.
 #
 # TODO: add ipv6 support
+#
+# BUGS:
+#  mengwong 20031211
+#    if there are multiple unrecognized mechanisms, they all
+#    need to be preserved in the 'unknown' Received-SPF header.
+#    right now only the first appears.
 # ----------------------------------------------------------
 
 use 5.006;
@@ -26,6 +32,9 @@ use vars qw($VERSION $CACHE_TIMEOUT);
 use URI::Escape;
 use Net::CIDR::Lite;
 use Net::DNS qw(); # by default it exports mx, which we define.
+
+use Sys::Hostname;
+eval { require Sys::Hostname::Long }; my $HOSTNAME = $@ ? hostname() : Sys::Hostname::Long::hostname_long();
 
 # ----------------------------------------------------------
 # 		       initialization
@@ -39,7 +48,7 @@ my $MAX_RECURSION_DEPTH = 10;
 
 my $Domains_Queried = {};
 
-$VERSION = "1.9.1";
+$VERSION = "1.9.3";
 
 $CACHE_TIMEOUT = 120;
 
@@ -62,7 +71,6 @@ Mail::SPF::Query - query Sender Permitted From for an IP,email,helo
 
   if    ($result eq "pass")     { ... } # domain is not forged
   elsif ($result eq "fail")     { ... } # domain is forged
-  elsif ($result eq "softfail") { ... } # domain may be forged
   else                          {       # domain has not implemented SPF
     if    ($guess eq "pass")    { ... } # result based on $guess_mechs
     elsif ($guess eq "fail")    { ... } # result based on $guess_mechs
@@ -152,7 +160,7 @@ sub new {
 
   my ($result, $smtp_comment, $header_comment) = $query->result();
 
-C<$result> will be one of C<pass>, C<fail>, C<softfail>, C<unknown>, or C<error>.
+C<$result> will be one of C<pass>, C<fail>, C<unknown>, or C<error>.
 
 C<pass> means the client IP is a designated mailer for the
 sender.  The mail should be accepted subject to local policy
@@ -161,10 +169,6 @@ regarding the sender.
 C<fail> means the client IP is not a designated mailer, and
 the sender wants you to reject the transaction for fear of
 forgery.
-
-C<softfail> means the transaction should be accepted but
-subject to further scrutiny because the domain is still
-transitioning toward SPF adoption.
 
 C<unknown> means the domain either does not publish SPF data
 or has a configuration error in the published data.
@@ -194,9 +198,18 @@ sub result {
 
   # print STDERR "*** result = $result\n";
 
+  if ($result eq "fail") {
+    my $receiver = uri_escape($HOSTNAME);
+    my $why_url = $query->macro_substitute("http://spf.pobox.com/why.html?sender=%{S}&ip=%{I}&receiver=$receiver");
+    $smtp_comment ||= "please see $why_url";
+  }
+
   $query->{smtp_comment} = $smtp_comment;
 
-  return (lc $result, $smtp_comment, $query->header_comment($result)) if wantarray;
+  return (lc $result,
+	  $smtp_comment,
+	  "$HOSTNAME: ". $query->header_comment($result)) if wantarray;
+
   return  lc $result;
 }
 
@@ -756,7 +769,15 @@ sub mech_mx {
 
   my $domain_to_use = $argument || $query->{domain};
 
-  foreach my $mx ($query->myquery($domain_to_use, "MX", "exchange", "preference")) {
+  my @mxes = $query->myquery($domain_to_use, "MX", "exchange", "preference");
+
+  # if a domain has no MX record, use its IP address instead.
+  if (! @mxes) {
+    $query->debuglog("  mechanism mx: no MX found for $domain_to_use.  Will pretend it is its own MX, and test its IP address.");
+    @mxes = ($domain_to_use);
+  }
+
+  foreach my $mx (@mxes) {
     # $query->debuglog("  mechanism mx: $mx");
 
     foreach my $a ($query->myquery($mx, "A", "address")) {
@@ -896,7 +917,7 @@ sub shorthand2value {
   my $shorthand = shift;
   return { "-" => "fail",
 	   "+" => "pass",
-	   "~" => "softfail",
+	   "~" => "unknown",
 	   "?" => "unknown" } -> {$shorthand} || $shorthand;
 }
 
@@ -999,6 +1020,7 @@ sub interpolate_explanation {
 	if (my ($prefix, $lhs, $rhs) = $word =~ /^([-~+?]?)([\w_-]+)([\/:]\S*)?$/i) {
 	  $rhs =~ s/^://;
 	  $prefix ||= "+";
+	  $prefix = "?" if $prefix eq "~"; # softfail is deprecated, has become "unknown"
 	  $query->debuglog("  lookup:   TXT prefix=$prefix, lhs=$lhs, rhs=$rhs");
 	  push @{$directive_set->{mechanisms}}, [$prefix => lc $lhs => $rhs];
 	  next;

@@ -1,4 +1,4 @@
-#!/usr/bin/perl -sw
+#!/icg/bin/perl -sw
 
 # simple forking daemon to provide SPF services
 # mengwong+spf@pobox.com
