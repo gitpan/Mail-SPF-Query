@@ -5,7 +5,7 @@ package Mail::SPF::Query;
 #
 # 		       Meng Weng Wong
 #		  <mengwong+spf@pobox.com>
-# $Id: Query.pm,v 1.3 2003/06/27 00:31:36 devel Exp $
+# $Id: Query.pm,v 1.4 2003/06/27 16:28:37 devel Exp $
 # test an IP / sender address pair for pass/fail/nodata/error
 #
 # license: opensource.
@@ -24,7 +24,7 @@ use vars qw($VERSION);
 
 my @FALLBACKS = qw(spf.mailzone.com);
 my %SEVERITY = (pass => 00, softfail => 05, fail => 10, error => 20, unknown => 50);
-($VERSION) = '$Id: Query.pm,v 1.3 2003/06/27 00:31:36 devel Exp $' =~ /([\d.]{3,})/;
+($VERSION) = '$Id: Query.pm,v 1.4 2003/06/27 16:28:37 devel Exp $' =~ /([\d.]{3,})/;
 
 # ----------------------------------------------------------
 # 	 no user-serviceable parts below this line
@@ -45,8 +45,8 @@ Mail::SPF::Query - query Sender Permitted From for an IP,email
   my ($result, $comment) = $query->result();
 
   if    ($result eq "pass")     { ... } # domain is not forged
-  elsif ($result eq "deny")     { ... } # domain is forged
-  elsif ($result eq "softdeny") { ... } # domain may be forged
+  elsif ($result eq "fail")     { ... } # domain is forged
+  elsif ($result eq "softfail") { ... } # domain may be forged
   else                          { ... } # domain has not implemented SPF
 
 =head1 ABSTRACT
@@ -157,7 +157,7 @@ sub result {
 sub debuglog {
   my $self = shift;
   return if ref $self and not $self->{debug};
-  print STDERR join (" ", @_), "\n";
+  printf STDERR "%s\n", join (" ", @_);
 }
 
 # ----------------------------------------------------------
