@@ -5,14 +5,14 @@ package Mail::SPF::Query;
 #
 # 		       Meng Weng Wong
 #		  <mengwong+spf@pobox.com>
-# $Id: Query.pm,v 1.35 2004/02/26 03:29:16 devel Exp $
+# $Id: Query.pm,v 1.38 2004/02/26 04:18:08 devel Exp $
 # test an IP / sender address pair for pass/fail/nodata/error
 #
 # http://spf.pobox.com/
 #
-# this version is compatible with draft-02.9.4.txt
+# this version is compatible with spf-draft-20040209.txt
 #
-# license: apache.  opensource.
+# license: Academic Free License
 #
 # The result of evaluating a SPF record associated with a domain is one of:
 # 
@@ -34,7 +34,6 @@ package Mail::SPF::Query;
 #
 # TODO:
 #  - add ipv6 support
-#  - parse caller-id and convert to spf
 #  - support the new header syntax, which will break some preexisting code
 #    (Received-SPF will now have a three part structure)
 #  - rename to v2.0 when we add caller-id support and the header syntax
@@ -46,7 +45,9 @@ package Mail::SPF::Query;
 #    right now only the first appears.
 # 
 #  mengwong 20040225: override and fallback keys need to be lc'ed at start
-# # ----------------------------------------------------------
+#  mengwong 20040225: inputs to cidr need to be sanity checked.
+# 
+# ----------------------------------------------------------
 
 use 5.006;
 use strict;
@@ -77,7 +78,7 @@ my $Domains_Queried = {};
 # if not set, then softfail is treated as neutral.
 my $softfail_supported = 1;
 
-$VERSION = "1.992";
+$VERSION = "1.993";
 
 $CACHE_TIMEOUT = 120;
 
@@ -1515,23 +1516,60 @@ sub try_fallback {
       $query->{spf_source} = "local policy";
     }
     else {
-      $query->debuglog("  DirectiveSet->new(): doing TXT query on $current_domain");
-      my @txt = $query->myquery($current_domain, "TXT", "char_str_list");
-      $query->debuglog("  DirectiveSet->new(): TXT query on $current_domain returned error=$query->{error}, last_dns_error=$query->{last_dns_error}");
+      my @txt;
 
-      if ($query->{error} || $query->{last_dns_error} eq 'NXDOMAIN' || ! @txt) {
-	# try the fallbacks.
-	$query->debuglog("  DirectiveSet->new(): will try fallbacks.");
-	if (exists $query->{fallback}
-	    and
-	    my $found_txt = $query->try_fallback($current_domain, "fallback")) {
-	  @txt = $found_txt;
-	}
-	else {
-	  $query->debuglog("  DirectiveSet->new(): fallback search failed.");
-	  return;
+      if ($current_domain !~ /^_ep\./) {
+	$query->debuglog("  DirectiveSet->new(): doing TXT query on $current_domain");
+	@txt = $query->myquery($current_domain, "TXT", "char_str_list");
+	$query->debuglog("  DirectiveSet->new(): TXT query on $current_domain returned error=$query->{error}, last_dns_error=$query->{last_dns_error}");
+
+	if ($query->{error} || $query->{last_dns_error} eq 'NXDOMAIN' || ! @txt) {
+	  # try the fallbacks.
+	  $query->debuglog("  DirectiveSet->new(): will try fallbacks.");
+	  if (exists $query->{fallback}
+	      and
+	      my $found_txt = $query->try_fallback($current_domain, "fallback")) {
+	    @txt = $found_txt;
+	  }
+	  else {
+	    $query->debuglog("  DirectiveSet->new(): fallback search failed.");
+	  }
 	}
       }
+
+      if (not @txt) {
+	eval { require LMAP::CID2SPF; };
+	if ($@) { 
+	  $query->debuglog("  DirectiveSet->new(): LMAP::CID2SPF not available, will not do Caller-ID lookup.");
+	}
+	else {
+	  my @errors_before_ep = ($query->{error}, $query->{last_dns_error});
+	  my $ep_version = "_ep.$current_domain"; $ep_version =~ s/^_ep\._ep/_ep/i;
+	  $query->debuglog("  DirectiveSet->new(): doing TXT query on _ep.$current_domain");
+	  my @eptxt = $query->myquery($ep_version, "TXT", "char_str_list");
+	  $query->debuglog("  DirectiveSet->new(): TXT query on $current_domain returned error=$query->{error}, last_dns_error=$query->{last_dns_error}");
+
+	  if (@eptxt) {
+	    my $xml = join "", @eptxt;
+	    
+	    # "<ep xmlns='http://ms.net/1'>...</ep>"
+	    if ($xml =~ m(^<ep xmlns='http://ms.net/1')) {
+	      my $c2s = LMAP::CID2SPF->new();
+	      $c2s->cid($xml);
+	      my $spf = $c2s->convert();
+	      $query->debuglog("  CID2SPF:  in: $xml");
+	      $query->debuglog("  CID2SPF: out: $spf");
+	      @txt = $spf;
+	    }
+	  }
+	  else {
+	    $query->debuglog("  restoring error from @errors_before_ep; had become previously $query->{error}");
+	    ($query->{error}, $query->{last_dns_error}) = @errors_before_ep;
+	  }
+	}
+      }
+
+      return if not @txt;
 
       # squish multiline responses into one first.
 

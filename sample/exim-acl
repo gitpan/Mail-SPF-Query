@@ -1,5 +1,5 @@
 # SPF Auth test for Exim 4.xx
-# Version 2.02 by david@ols.es
+# Version 2.05 by david @ ols . es
 #
 # Features:
 #
@@ -15,17 +15,17 @@
 #
 # Usage instructions:
 #
-# 1. copy this file to your exim installation directory
+# 1. copy this file to your /usr/local/exim
 #
 # 2. add this line to your exim configuration file after your
 #    begin acl:
 #
-#    .include spf.acl
+#    .include /usr/local/exim/spf.acl
 #
 # 3. Grab a copy of Mail::SPF::Query from
 #    http://spf.pobox.com/downloads.html and install it
 #
-# 4. Run spfd -path=/tmp/spfd
+# 4. Run spfd -path=/tmp/spfd as the same user as Exim runs
 #
 # 5. Now you can use the test on your RCPT/MAIL ACL this way:
 #
@@ -35,6 +35,9 @@
 #
 #    deny    senders     = :
 #            !acl        = spf_from_acl
+#
+#    now acl_m8 will hold 'pass','fail', 'unknown'
+#    so you can take other decisions based on the result
 
 spf_rcpt_acl:
 
@@ -57,7 +60,9 @@ spf_from_acl:
 spf_check:
 
     warn     set acl_m9  = ${readsocket{/tmp/spfd}\
-                           {ip=$sender_host_address\nhelo=$sender_helo_name\
+                           {ip=$sender_host_address\n\
+			   helo=${if def:sender_helo_name\
+			   {$sender_helo_name}{NOHELO}}\
                            \nsender=$acl_m8\n\n}{20s}{\n}{socket failure}} 
 
     # Defer on socket error
