@@ -5,7 +5,7 @@ package Mail::SPF::Query;
 #
 # 		       Meng Weng Wong
 #		  <mengwong+spf@pobox.com>
-# $Id: Query.pm,v 1.41 2004/02/27 03:00:57 devel Exp $
+# $Id: Query.pm,v 1.44 2004/04/26 05:54:27 mengwong Exp $
 # test an IP / sender address pair for pass/fail/nodata/error
 #
 # http://spf.pobox.com/
@@ -35,9 +35,33 @@ package Mail::SPF::Query;
 #
 # TODO:
 #  - add ipv6 support
-#  - support the new header syntax, which will break some preexisting code
-#    (Received-SPF will now have a three part structure)
 #  - rename to v2.0 when we add caller-id support and the header syntax
+# 
+#  - also, Received-SPF should support a local-secret argument to prevent Received-SPF forgery.
+#  - set up a default fallback yahoo.com domain
+# 
+#  - add support for doing HELO tests before return-path tests.
+# 
+#  - if the spf_source is not original-spf-record, do not return why.html.  this doesn't make sense:
+# perl -MData::Dumper -MMail::SPF::Query -le 'my $query = Mail::SPF::Query->new(ipv4=>$ARGV[0], helo=>$ARGV[1], sender=>$ARGV[2], max_lookup_count=>2, myhostname=>"poopy.com", debug=>1); print Dumper($query->result);' 208.210.125.24 "testing..com" mengwong@dumbo.pobox.com 
+#    $VAR1 = 'fail';
+#    $VAR2 = 'Please see http://spf.pobox.com/why.html?sender=mengwong%40www.mailzone.com&ip=208.210.125.1&receiver=poopy.com';
+#    $VAR3 = 'poopy.com: explicit fallback found: *. defines v=spf1 -all';
+#    $VAR4 = 'v=spf1 -all';
+#    $VAR5 = {
+#              'result' => 'fail',
+#              'header_pairs' => 'receiver=poopy.com; client-ip=208.210.125.1; envelope-from=mengwong@www.mailzone.com; helo=testing.com; mechanism=-all; x-spf-source=explicit fallback found: *. defines v=spf1 -all;',
+#              'unknown_mechs' => [],
+#              'vouches' => [],
+#              'modifiers' => undef,
+#              'header_comment' => 'poopy.com: explicit fallback found: *. defines v=spf1 -all',
+#              'smtp_comment' => 'Please see http://spf.pobox.com/why.html?sender=mengwong%40www.mailzone.com&ip=208.210.125.1&receiver=poopy.com',
+#              'spf_record' => 'v=spf1 -all'
+#            };
+#    
+#    perl -MData::Dumper -MMail::SPF::Query -le  208.210.125.1 "testing.com"   0.11s user 0.03s system 126% cpu 0.110 total
+#    20040425-14:57:53 root@dumbo:~mengwong/src/site_perl/SPF#
+#    
 # 
 # BUGS:
 #  mengwong 20031211
@@ -53,7 +77,7 @@ use 5.006;
 use strict;
 use warnings;
 no warnings 'uninitialized';
-use vars qw($VERSION $CACHE_TIMEOUT);
+use vars qw($VERSION $CACHE_TIMEOUT $DNS_RESOLVER_TIMEOUT);
 
 use URI::Escape;
 use Net::CIDR::Lite;
@@ -78,9 +102,11 @@ my $Domains_Queried = {};
 # if not set, then softfail is treated as neutral.
 my $softfail_supported = 1;
 
-$VERSION = "1.996";
+$VERSION = "1.997";
 
 $CACHE_TIMEOUT = 120;
+
+$DNS_RESOLVER_TIMEOUT = 15;
 
 # ----------------------------------------------------------
 # 	 no user-serviceable parts below this line
@@ -104,29 +130,29 @@ Mail::SPF::Query - query Sender Policy Framework for an IP,email,helo
 
     if    ($result eq "pass") { "domain is (probably) not forged.  apply RHSBL and content filters" }
     elsif ($result eq "fail") { "domain is forged.  reject or save to spambox" }
-    else                      { "domain has no SPF, or broken SPF, may be forged.  apply content filters" }
 
   The default mechanism for trusted=>1 is "include:spf.trusted-forwarder.org".
   The default mechanisms for guess=>1 are "a/24 mx/24 ptr".
 
 =head1 ABSTRACT
 
-The SPF protocol relies on sender domains to publish a DNS
-whitelist of their designated outbound mailers.  Given an
-envelope sender, Mail::SPF::Query determines the legitimacy
-of an SMTP client IP.
+The SPF protocol relies on sender domains to describe their
+designated outbound mailers in DNS.  Given an email address,
+Mail::SPF::Query determines the legitimacy of an SMTP client
+IP.
 
 =head1 DESCRIPTION
 
-There are two ways to use Mail::SPF::Query.  Which you
-choose depends on whether the domains your server is an MX
-for have secondary MXes which your server doesn't know about.
+There are two ways to use Mail::SPF::Query.  Your choice
+depends on whether the domains your server is an MX for have
+secondary MXes which your server doesn't know about.
 
-The first style, calling ->result(), is suitable when all
-mail is received directly from the originator's MTA.  If the
-domains you receive do not have secondary MX entries, this
-is appropriate.  This style of use is outlined in the
-SYNOPSIS above.  This is the common case.
+The first and more common style, calling ->result(), is
+suitable when all mail is received directly from the
+originator's MTA.  If the domains you receive do not have
+secondary MX entries, this is appropriate.  This style of
+use is outlined in the SYNOPSIS above.  This is the common
+case.
 
 The second style is more complex, but works when your server
 receives mail from secondary MXes.  This performs checks as
@@ -171,6 +197,7 @@ the following command:
      callerid => {   "hotmail.com" => { check => 1 },
                    "*.hotmail.com" => { check => 1 },
                    "*."            => { check => 0 }, },
+ },
 
   if ($@) { warn "bad input to Mail::SPF::Query: $@" }
 
@@ -259,8 +286,14 @@ sub new {
   for ($query->{sender}) { s/^\s+//; s/\s+$//; }
 
   $query->{spf_source} = "domain of $query->{sender}";
+  $query->{spf_source_type} = "original-spf-record";
 
   ($query->{domain}) = $query->{sender} =~ /([^@]+)$/; # given foo@bar@baz.com, the domain is baz.com, not bar@baz.com.
+
+  # the domain should not be an address literal --- [1.2.3.4]
+  if ($query->{domain} =~ /^\[\d+\.\d+\.\d+\.\d+\]$/) {
+    die "sender domain should be an FQDN, not an address literal";
+  }
 
   if (not $query->{helo}) { require Carp; import Carp qw(cluck); cluck ("Mail::SPF::Query: ->new() requires a \"helo\" argument.\n");
 			    $query->{helo} = $query->{domain};
@@ -313,7 +346,7 @@ sub new {
 
 =head2 $query->result()
 
-  my ($result, $smtp_comment, $header_comment, $spf_record) = $query->result();
+  my ($result, $smtp_comment, $header_comment, $spf_record, $detail) = $query->result();
 
 C<$result> will be one of C<pass>, C<fail>, C<softfail>, C<neutral>, C<none>, C<error> or C<unknown [...]>.
 
@@ -372,6 +405,30 @@ perform custom sanitization.
 In particular, assume that the C<smtp_comment> might
 contain a newline character. 
 
+The C<detail> element is a hash of all the foregoing
+elements, plus extra data returned by the SPF result.
+
+Why the weird duplication?  In the beginning, C<result()>
+returned only one value, the C<$result>.  Then
+C<$smtp_comment> and C<$header_comment> came along.  Then
+C<$spf_record>.  Past a certain number of positional
+results, it makes more sense to have a hash.  But we didn't
+want to break backwards compatibility, so we just declared
+that the fifth result would be a hash and future return
+value would go in there.
+
+The keys of the hash are:
+
+  result
+  smtp_comment
+  header_comment
+  header_pairs
+  spf_record
+  modifiers
+  vouches
+
+$query->result();
+
 =cut
 
 
@@ -398,10 +455,23 @@ sub result {
 
   # $result =~ s/\s.*$//; # this regex truncates "unknown some:mechanism" to just "unknown"
 
-  return ($query->sanitize(lc $result),
-	  $query->sanitize($smtp_comment),
-	  $query->sanitize($header_comment),
-	  $query->sanitize($orig_txt),
+  $query->{result} = $result;
+
+  my $hash = { result         => $query->sanitize(lc $result),
+	       smtp_comment   => $query->sanitize($smtp_comment),
+	       header_comment => $query->sanitize($header_comment),
+	       spf_record     => $query->sanitize($orig_txt),
+	       modifiers      => $query->{modifiers},
+	       vouches        => [ ], # reserved for accreditation vouches.
+	       unknown_mechs  => [ ], # reserved for unknown mechanisms.
+	       header_pairs   => $query->sanitize(scalar $query->header_pairs()),
+	     };	       
+
+  return ($hash->{result},
+	  $hash->{smtp_comment},
+	  $hash->{header_comment},
+	  $hash->{spf_record},
+	  $hash,
 	 ) if wantarray;
 
   return  $query->sanitize(lc $result);
@@ -413,6 +483,10 @@ sub header_comment {
   my $ip = $query->ip;
   if ($result eq "pass" and $query->{smtp_comment} eq "localhost is always allowed.") { return $query->{smtp_comment} }
 
+  $query->debuglog("header_comment: spf_source = $query->{spf_source}");
+  $query->debuglog("header_comment: spf_source_type = $query->{spf_source_type}");
+
+  if ($query->{spf_source_type} eq "original-spf-record") {
   return
     (  $result eq "pass"      ? "$query->{spf_source} designates $ip as permitted sender"
      : $result eq "fail"      ? "$query->{spf_source} does not designate $ip as permitted sender"
@@ -423,7 +497,48 @@ sub header_comment {
      : $result eq "error"     ? "encountered temporary error during SPF processing of $query->{spf_source}"
      : $result eq "none"      ? "$query->{spf_source} does not designate permitted sender hosts" 
      :                          "could not perform SPF query for $query->{spf_source}" );
+  }
 
+  return $query->{spf_source};
+
+}
+
+sub header_pairs {
+  my $query = shift;
+# from spf-draft-200404.txt
+#    SPF clients may append zero or more of the following key-value-pairs
+#    at their discretion:
+# 
+#       receiver       the hostname of the SPF client
+#       client-ip      the IP address of the SMTP client
+#       envelope-from  the envelope sender address
+#       helo           the hostname given in the HELO or EHLO command
+#       mechanism      the mechanism that matched (if no mechanisms
+#                      matched, substitute the word "default".)
+#       problem        if an error was returned, details about the error
+# 
+#    Other key-value pairs may be defined by SPF clients.  Until a new key
+#    name becomes widely accepted, new key names should start with "x-".
+
+  my @pairs = (
+	       "receiver"      => $query->{myhostname},
+	       "client-ip"     => ($query->{ipv4} || $query->{ipv6} || ""),
+	       "envelope-from" => $query->{sender},
+	       "helo"          => $query->{helo},
+	       mechanism       => ($query->{matched_mechanism} ? display_mechanism($query->{matched_mechanism}) : "default"),
+	       ($query->{result} eq "error"
+		? (problem         => $query->{spf_error_explanation})
+		: ()),
+	       ($query->{spf_source_type} ne "original-spf-record" ? ("x-spf-source" => $query->{spf_source}) : ()),
+	      );
+
+  if (wantarray) { return @pairs; }
+  my @pair_text;
+  while (@pairs) {
+    my ($key, $val) = (shift(@pairs), shift (@pairs));
+    push @pair_text, "$key=$val;";
+  }
+  return join " ", @pair_text;
 }
 
 =item C<< $query->result2() >>
@@ -531,7 +646,11 @@ sub result2 {
 sub is_secondary_for {
     my ($host, $addr) = @_;
 
-    my $resolver = Net::DNS::Resolver->new;
+    my $resolver = Net::DNS::Resolver->new(
+					   tcp_timeout => $DNS_RESOLVER_TIMEOUT,
+					   udp_timeout => $DNS_RESOLVER_TIMEOUT,
+					   )
+					   ;
     if ($resolver) {
         my $mx = $resolver->send($host, 'MX');
         if ($mx) {
@@ -820,7 +939,7 @@ sub spfquery {
     }
     if ($query->{last_dns_error} eq 'NXDOMAIN') {
         my $explanation = $query->macro_substitute($query->{default_explanation});
-        return "fail", $explanation, "domain of sender $query->{sender} does not exist";
+        return "unknown", $explanation, "domain of sender $query->{sender} does not exist";
     }
     return "none", "SPF", "domain of sender $query->{sender} does not designate mailers";
   }
@@ -851,6 +970,7 @@ sub spfquery {
 				   $explanation,
 				   $comment,
 				   $query->{directive_set}->{orig_txt});
+      $query->{matched_mechanism} = $mechanism;
       return $result, $explanation, $comment, $query->{directive_set}->{orig_txt};
     }
   }
@@ -873,6 +993,8 @@ sub spfquery {
     $query->debuglog("  executed redirect=$new_domain, got result @inner_result");
 
     $query->{spf_source} = $inner_query->{spf_source};
+    $query->{spf_source_type} = $inner_query->{spf_source_type};
+    $query->{matched_mechanism} = $inner_query->{matched_mechanism};
 
     return @inner_result;
   }
@@ -1031,7 +1153,7 @@ sub macro_substitute_item {
     # We need to escape a bunch of characters inside a character class
     $delim =~ s/([\^\-\]\:\\])/\\$1/g;
 
-    if ($reverse || $num) {
+    if (length $delim) {
         my @parts = split /[$delim]/, $newval;
 
         @parts = reverse @parts if ($reverse);
@@ -1073,6 +1195,18 @@ sub macro_substitute {
 }
 
 # ----------------------------------------------------------
+# 		     display_mechanism
+# 
+# in human-readable form; used in header_pairs above.
+# ----------------------------------------------------------
+
+sub display_mechanism {
+  my ($modifier, $mechanism, $argument, $source) = @{shift()};
+
+  return "$modifier$mechanism" . (length($argument) ? ":$argument" : "");
+}
+
+# ----------------------------------------------------------
 #		     evaluate_mechanism
 # ----------------------------------------------------------
 
@@ -1093,8 +1227,11 @@ sub evaluate_mechanism {
     return if not $hit;
 
     return ($hit, $text) if ($hit ne "hit");
-
-    $query->{spf_source} = $source if ($source);
+    
+    if ($source) {
+      $query->{spf_source} = $source;
+      $query->{spf_source_type} = "from mechanism $mechanism";
+    }
 
     return $query->shorthand2value($modifier), $text;
   }
@@ -1444,7 +1581,10 @@ sub reverse_in_addr {
 
 sub resolver {
   my $query = shift;
-  return $query->{res} ||= Net::DNS::Resolver->new;
+  return $query->{res} ||= Net::DNS::Resolver->new(
+						   tcp_timeout => $DNS_RESOLVER_TIMEOUT,
+						   udp_timeout => $DNS_RESOLVER_TIMEOUT,
+						  );
 }
 
 sub fallbacks {
@@ -1518,6 +1658,7 @@ sub found_record_for {
   return if not $found;
   my $txt = $found->{record};
   $query->{spf_source} = "explicit $which_hash found: $matched_domain_glob defines $txt";
+  $query->{spf_source_type} = "full-explanation";
   $txt = "v=spf1 $txt" if $txt !~ /^v=spf1\b/i;
   return $txt;
 }
@@ -1576,6 +1717,7 @@ sub callerid_wanted_for {
     if ($override_text) {
       $txt = "v=spf1 $override_text ?all";
       $query->{spf_source} = "local policy";
+      $query->{spf_source_type} = "full-explanation";
     }
     else {
       my @txt;
@@ -1626,6 +1768,7 @@ sub callerid_wanted_for {
 	      $query->debuglog("  CID2SPF:  in: $xml");
 	      $query->debuglog("  CID2SPF: out: $spf");
 	      $query->{spf_source} = "Microsoft Caller-ID for Email record at $ep_version";
+	      $query->{spf_source_type} = "full-explanation";
 	      @txt = $spf;
 	    }
 	  }
@@ -1650,6 +1793,7 @@ sub callerid_wanted_for {
       if (!defined $txt && $default_record) {
           $txt = "v=spf1 $default_record ?all";
           $query->{spf_source} = "local policy";
+	  $query->{spf_source_type} = "full-explanation";
       }
     }
 
@@ -1724,7 +1868,11 @@ sub callerid_wanted_for {
                     my @locallist = $localset->mechanisms;
                     # Get rid of the ?all at the end of the list
                     pop @locallist;
-                    map { $_->[3] = $_->[1] eq 'include' ? "SPF record at " . $query->macro_substitute($_->[2]) : "local policy" } @locallist;
+		    # $_->[3] goes into $query->{spf_source}.
+                    map { $_->[3] = ($_->[1] eq 'include'
+				     ? "local policy includes SPF record at " . $query->macro_substitute($_->[2])
+				     : "local policy") }
+		      @locallist;
                     splice(@$mechanisms, $index + 1, 0, @locallist);
                 }
             }
@@ -1743,7 +1891,9 @@ sub callerid_wanted_for {
 
   sub show_mechanisms   {
     my $directive_set = shift;
-    return map { $_->[0] . $_->[1] . "(" . ($_->[2]||"") . ")" } $directive_set->mechanisms;
+    my @toreturn = map { $_->[0] . $_->[1] . "(" . ($_->[2]||"") . ")" } $directive_set->mechanisms;
+    # print STDERR ("showing mechanisms @toreturn: " . Dumper($directive_set)); use Data::Dumper;
+    return @toreturn;
   }
 }
 
@@ -1768,6 +1918,11 @@ permit mail from secondaries.
 Meng Weng Wong, <mengwong+spf@pobox.com>
 
 Philip Gladstone
+
+=head1 ACKNOWLEDGEMENTS
+
+Joe Christy joe@eshu.net 2004-04-20 for the $DNS_RESOLVER_TIMEOUT patch.
+
 
 =head1 SEE ALSO
 

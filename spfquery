@@ -1,151 +1,310 @@
-#!/usr/bin/perl -sw-
+#!/usr/bin/perl -w-
 
-# ----------------------------------------------------------
-# 			  spfquery
+# spfquery - Sender Permitted From command line utility
 #
-# 		       Meng Weng Wong
-#		  <mengwong+spf@pobox.com>
-# $Id: spfquery,v 1.4 2004/01/09 23:52:06 devel Exp $
-# test an IP / helo / sender address tuple for pass/fail/softfail/unknown/error
+#  Author: Wayne Schlitt <wayne@midwestcs.com>
 #
-# usage:
-#        spfquery  -ipv4=127.0.0.1  -sender=myname@myhost.mydomain.com -helo=helohost.com
+#  File:   spfquery.c
+#  Desc:   SPF command line utility
 #
-# echo "127.0.0.1 myname@myhost.mydomain.com helohost.com" | spfquery                    # preferred
-# echo "myname@myhost.mydomain.com 127.0.0.1 helohost.com" | spfquery                    # deprecated
 #
-# output:
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of either:
 #
-#   pass     (client localhost[1.2.3.4] is designated mailer for domain of sender myname@myhost.mydomain.com)
-#   error    (temporary failure while resolving designated mailer status for domain of sender myname@myhost.mydomain.com)
-#   unknown  (domain of sender myname@myhost.mydomain.com does not designate mailers)
-#   fail     (client localhost[1.2.3.4] is not a designated mailer for domain of sender myname@myhost.mydomain.com)
-#   softfail (client localhost[1.2.3.4] is not a designated mailer for transitioning domain of sender myname@myhost.mydomain.com)
+#   a) The GNU Lesser General Public License as published by the Free
+#      Software Foundation; either version 2.1, or (at your option) any
+#      later version,
 #
-# exit code: 0    fail
-#            1    softfail
-#            2    unknown
-#            3    error
-#            4    pass
+#   OR
 #
-# options:
-# 
-#  -guess_mechs="fasdfas fasf asdf"
+#   b) The two-clause BSD license.
 #
-# flags:  -q for quiet
 #
-# license: opensource.
+# The two-clause BSD license:
 #
-# TODO: add ipv6 support
-# ----------------------------------------------------------
+#
+# Redistribution and use in source and binary forms, with or without
+# modification, are permitted provided that the following conditions
+# are met:
+#
+# 1. Redistributions of source code must retain the above copyright
+#    notice, this list of conditions and the following disclaimer.
+# 2. Redistributions in binary form must reproduce the above copyright
+#    notice, this list of conditions and the following disclaimer in the
+#    documentation and/or other materials provided with the distribution.
+#
+# THIS SOFTWARE IS PROVIDED BY THE AUTHOR ``AS IS'' AND ANY EXPRESS OR
+# IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES
+# OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.
+# IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY DIRECT, INDIRECT,
+# INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT
+# NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+# DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+# THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+# (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
+# THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-# ----------------------------------------------------------
-# 		       initialization
-# ----------------------------------------------------------
 
-my $looks_like_ipv4  = qr/\d+\.\d+\.\d+\.\d+/;
-my $looks_like_email = qr/\S+\@\S+/;
+my $SPFQUERY_VERSION = "2.1";
 
-# ----------------------------------------------------------
-# 	 no user-serviceable parts below this line
-# ----------------------------------------------------------
 
-use strict;
-use vars qw ($ipv4 $ip $sender $helo $fallback $debug $v $test $q $guess_mechs); $debug = defined $debug || defined $v;
 use Mail::SPF::Query;
 
-my $ExitCode = 255;
+use Getopt::Long qw(:config gnu_compat);
 
-my @Fallbacks = grep { length } (defined $fallback ? split /,/, $fallback : defined $test ? "spf-test.mailzone.com" : "spf.mailzone.com");
+sub usage()
+{
+  printf STDERR <<'EOT';
+Usage:
 
-my %Query = process_arguments();
-if (exists $Query{ipv4}) {
-  
-  my $spfquery = new Mail::SPF::Query (%Query, debug=>$debug, fallbacks => \@Fallbacks);
-      
-  my ($passfail, $smtp_comment, $header_comment, $spf_record) = $spfquery->result;
-  print STDERR "result=$passfail" . ($smtp_comment ? ": $smtp_comment" : "") . "\n" unless defined $q;
-  print "Received-SPF: $passfail ($header_comment)\n" unless defined $q;
+spfquery [control options | data options] ...
 
-  my ($guess, $smtp_guess, $header_guess) = $spfquery->best_guess();
-  print STDERR "guess=$guess" . ($smtp_guess ? ": $smtp_guess" : "") . "\n" unless defined $q;
-  print "X-SPF-Guess: $guess ($header_guess)\n" if (not defined $q and $header_guess);
-
-  exit0123($passfail);
+Use the -help option for more information
+EOT
 }
 
-my ($passfail, $text);
-while (<>) {
-  next if /^\s*\#/ || /^\s*$/;
+sub help()
+{
+  printf STDERR <<'EOT';
+Usage:
 
-  my %Query = process_line($_);
-  my @output = ($Query{ipv4}, $Query{sender});
-  my $Res;
+spfquery [control options | data options] ...
 
-  print STDERR "process_line got me @{[%Query]}\n" if $debug;
+Valid data options are:
+    -file <filename>           read spf data from a file.  Use '-'
+                               to read from stdin.
 
-  my $spfquery = eval { new Mail::SPF::Query (%Query, debug=>defined $debug, fallbacks => \@Fallbacks, res=>$Res); };
-  if ($@) { push @output, "error", $@; } # this conflates internal errors and DNS errors.
+    -ip <IP address>           The IP address that is sending email
+    -sender <email address>    The email address used as the
+                               envelope-from.  If no username (local
+                               part) is given, 'postmaster' will be
+                               assumed.
+    -helo <domain name>        The domain name given on the SMTP HELO
+                               command.  This is only needed if the
+                               -sender option is not given.
+    -rcpt-to <email addresses> A comma separated lists of email addresses
+                               that will have email from their secondary
+                               MXes automatically allowed.
+
+The data options are required.  The -file option conflicts with all
+the other data options.  The -helo and -rcpt-to are optional.
+ 
+
+Valid control options are:
+    -debug [debug level]       debug level.
+    -local <SPF mechanisms>    Local policy for whitelisting.
+    -trusted <0|1>             Should trusted-forwarder.org be checked?
+    -guess <SPF mechanisms>    Default checks if no SPF record is found.
+    -default-explanation <str> Default explanation string to use.
+    -max-lookup <number>       Maximum number of DNS lookups to allow
+    -sanitize <0|1>            Clean up invalid characters in output?
+    -name <domain name>        The name of the system doing the SPF
+                               checking
+    -override <...>            Override SPF records for domains
+    -fallback <...>            Fallback SPF records for domains
+    -dns <dns layers>          Comma seperated list of DNS layers
+                               to use.
+
+    -keep-comments             Print comments found when reading
+                               from a file.
+    -version                   Print version of spfquery.
+    -help                      Print out these options.
+
+Examples:
+
+spfquery -ip=11.22.33.44 -sender=user@aol.com -helo=spammer.tld
+spfquery -f test_data
+echo \"127.0.0.1 myname@mydomain.com helohost.com\" | spfquery -f -
+EOT
+}
+
+
+my $opt_file = undef;
+
+my $opt_ip = undef;
+my $opt_sender = undef;
+my $opt_helo = undef;
+my $opt_rcpt_to = undef;
+
+my $opt_local = undef;
+my $opt_trusted = undef;
+my $opt_guess = undef;
+my $opt_exp = undef;
+my $opt_max_lookup = undef;
+my $opt_sanitize = undef;
+my $opt_name = "spfquery";
+my $opt_debug = 0;
+my $opt_keep_comments = 0;
+my $opt_fallback = undef;
+my $opt_override = undef;
+my $opt_dns = undef;
+my $opt_help = undef;
+
+my $result = GetOptions('file=s'		=> \$opt_file,
+
+			'ip:s'			=> \$opt_ip,
+			'ipv4:s'		=> \$opt_ip,
+			'sender:s'		=> \$opt_sender,
+			'helo:s'		=> \$opt_helo,
+			'rcpt-to:s'		=> \$opt_rcpt_to,
+			
+			'debug=i'		=> \$opt_debug,
+			'local:s'		=> \$opt_local,
+			'trusted:s'		=> \$opt_trusted,
+			'guess:s'		=> \$opt_guess,
+			'default-explanation:s' => \$opt_exp,
+			'max-lookup:s'		=> \$opt_max_lookup,
+			'sanitize:s'		=> \$opt_sanitize,
+			'name:s'		=> \$opt_name,
+			'override:s'		=> \$opt_override,
+			'fallback:s'		=> \$opt_fallback,
+			'dns:s'			=> \$opt_dns,
+
+			'keep-comments'		=> \$opt_keep_comments,
+			'version'		=> \$opt_version,
+			'help'			=> \$opt_help
+			);
+
+if ($opt_help) {
+  help();
+  exit 255;
+}
+
+if (!$result) {
+  usage();
+  exit 255;
+}
+
+if ($opt_version) {
+  printf STDERR "spfquery version %s\n\n", $SPFQUERY_VERSION;
+  usage();
+  exit 255;
+}
+
+#
+# process the SPF request
+#
+my $res;
+
+if (!defined($opt_ip) || (!defined($opt_sender) && !defined($opt_helo))) {
+  if (!defined($opt_file) ||
+      defined($opt_ip) || defined($opt_sender) || defined($opt_helo)) {
+    usage();
+    exit 255;
+  }
+
+  #
+  # the requests are on STDIN
+  #
+	
+  local *FIN;
+
+  if ( $opt_file eq "-" ) {
+    *FIN = \*STDIN;
+  }
   else {
-    $Res ||= $spfquery->resolver;
-    ($passfail, $text) = $spfquery->result;
-    push @output, $passfail, $text;
+    open( FIN, $opt_file ) || die "Could not open: %s\n", $opt_file;
+  }
+	
+  while ( <FIN> ) {
+    chomp;
+
+    if ( /^\s*$/ || /^\s*#/ ) {
+      if ( $opt_keep_comments ) {
+	printf "%s\n", $_;
+      }
+
+      next;
+    }
+    s/^\s*//;
+
+    ($opt_ip, $opt_sender, $opt_helo, $opt_rcpt_to) = split;
+
+    $res = do_query();
+  }
+}
+else {
+  if (defined($opt_file)) {
+    usage();
+    exit 255;
   }
 
-  print join ("\t", @output), "\n";
+  $res = do_query();
 }
-exit0123($passfail);
 
-# ----------------------------------------------------------
-# 			 functions
-# ----------------------------------------------------------
+exit $res;
 
-sub process_arguments {
-  my %query;
 
-  $query{guess_mechs} = $guess_mechs if defined $guess_mechs;
-  $query{helo}   = $helo   if defined $helo;
-  $query{ipv4}   = $ipv4   if defined $ipv4;
-  $query{sender} = $sender if defined $sender;
-  $query{ip}     = $ip     if defined $ip;
-  $query{ipv4} = delete $query{ip} if $query{ip} and $query{ip} =~ $looks_like_ipv4;
 
-  use Data::Dumper;
+sub do_query {
 
+
+  #
+  # Process the SPF request and print the results
+  #
+
+  if ( !defined( $opt_sender ) ) { $opt_sender = ""; }
+  if ( !defined( $opt_helo   ) ) { $opt_helo = ""; }
+
+  my $query = new Mail::SPF::Query (ipv4       => $opt_ip,
+				    sender     => $opt_sender,
+				    helo       => $opt_helo,
+				    local      => $opt_local,
+				    trusted    => $opt_trusted,
+				    guess      => $opt_guess,
+				    default_explanation => $opt_exp,
+				    max_lookup => $opt_max_lookup,
+				    sanitize   => $opt_sanitize,
+				    myhostname => $opt_name,
+				    fallback   => $opt_fallback,
+				    override   => $opt_override,
+				    debug      => $opt_debug,
+				   );
+
+  my ($result, $smtp_comment, $header_comment);
+  my $per_result;
+  if (!defined($opt_rcpt_to) || $opt_rcpt_to eq "") {
+    ($result, $smtp_comment, $header_comment) = $query->result;
+    $per_result = $result;
+  }
+  else {
+    $result = "";
+    foreach my $recip (split(',', $opt_rcpt_to)) {
+
+      ($per_result, $smtp_comment, $header_comment) = $query->result2( split(';', $recip));
+      if ($result eq "" ) {
+	$result = $per_result;
+      }
+      else {
+	$result .= ",".$per_result;
+      }
+    }
+    ($per_result, $smtp_comment, $header_comment) = $query->message_result2;
+
+    if ($result eq "" ) {
+      $result = $per_result;
+    }
+    else {
+      $result .= ",".$per_result;
+    }
+  }
+	
+  my $received_spf;
+  $received_spf = "Received-SPF: $per_result ($header_comment) client-ip=$opt_ip;";
+  $received_spf .= " envelope-from=$opt_sender;" if ( defined( $opt_sender ) );
+  $received_spf .= " helo=$opt_helo;" if ( defined( $opt_helo ) );
   { no warnings 'uninitialized';
-    print STDERR "args: fallback=$query{fallback}, ip=$query{ip}, ipv4=$query{ipv4}, sender=$query{sender}\n" if $debug;
+    print "$result\n$smtp_comment\n$header_comment\n$received_spf\n";
   }
 
-  return %query;
+  return 0 if $result eq "pass";
+  return 1 if $result eq "fail";
+  return 2 if $result eq "softfail";
+  return 3 if $result eq "neutral";
+  return 4 if $result eq "unknown";
+  return 5 if $result eq "error";
+  return 6 if $result eq "none";
+
+  return 255;
 }
 
-sub process_line {
-  my %query;
-  local $_ = shift;
-
-  s/\s+\#//;
-
-  for (split) {
-    $query{ipv4}   = $_ if /$looks_like_ipv4/;
-    $query{sender} = $_ if /$looks_like_email/;
-  }
-
-  return %query;
-}
-
-sub exit0123 {
-  my $passfail = shift;
-  my $ExitCode = 255;
-
-  $ExitCode=0 if $passfail eq "pass";
-  $ExitCode=0 if $passfail eq "softfail";
-  $ExitCode=1 if $passfail eq "fail";
-  $ExitCode=2 if $passfail eq "error";
-  $ExitCode=3 if $passfail eq "unknown";
-
-  exit $ExitCode;
-}
-
-# ----------------------------------------------------------
-# 		     format statements
-# ----------------------------------------------------------

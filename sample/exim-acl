@@ -1,5 +1,5 @@
 # SPF Auth test for Exim 4.xx
-# Version 2.05 by david @ ols . es
+# Version 2.09 by david @ ols . es
 #
 # Features:
 #
@@ -7,7 +7,7 @@
 #
 # Warning:
 #
-#    Will use acl_m9, acl_m8, acl_m7 and acl_m6
+#    Will use acl_m9, acl_m8, acl_m7
 #
 # Requires
 #
@@ -36,8 +36,13 @@
 #    deny    senders     = :
 #            !acl        = spf_from_acl
 #
-#    now acl_m8 will hold 'pass','fail', 'unknown'
+#    now acl_m8 will hold 'pass','fail', 'unknown', ...
 #    so you can take other decisions based on the result
+#    like being more strict on some circumstances:
+#
+#    deny     senders     = :
+#             condition   = ${if eq {$acl_m8}{softfail}{yes}{no}}
+#             message     = Not authorized by SPF
 
 spf_rcpt_acl:
 
@@ -45,7 +50,7 @@ spf_rcpt_acl:
 
     warn     set acl_m8  = $sender_address
     deny     !acl        = spf_check
-    warn     message     = Received-SPF: $acl_m7
+    warn     message     = Received-SPF: $acl_m8 ($acl_m7)
     accept
 
 spf_from_acl:
@@ -54,7 +59,7 @@ spf_from_acl:
 
     warn     set acl_m8  = ${address:$h_from:}
     deny     !acl        = spf_check
-    warn     message     = Received-SPF: $acl_m7
+    warn     message     = Received-SPF: $acl_m8 ($acl_m7)
     accept
 
 spf_check:
@@ -79,7 +84,7 @@ spf_check:
     # Check for fail
 
     deny     condition   = ${if eq{$acl_m8}{fail}{yes}{no}}
-             message     = $acl_m7
+             message     = ${extract{smtp_comment}{$acl_m9}{$value}{}}
              log_message = Not authorized by SPF
 
     accept
