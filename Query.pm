@@ -5,7 +5,7 @@ package Mail::SPF::Query;
 #
 # 		       Meng Weng Wong
 #		  <mengwong+spf@pobox.com>
-# $Id: Query.pm,v 1.27 2003/12/15 22:58:10 devel Exp $
+# $Id: Query.pm,v 1.29 2003/12/17 22:29:25 devel Exp $
 # test an IP / sender address pair for pass/fail/nodata/error
 #
 # http://spf.pobox.com/
@@ -48,7 +48,7 @@ my $MAX_RECURSION_DEPTH = 10;
 
 my $Domains_Queried = {};
 
-$VERSION = "1.9.5";
+$VERSION = "1.9.6";
 
 $CACHE_TIMEOUT = 120;
 
@@ -121,17 +121,19 @@ sub new {
 
   $query->{sender} =~ s/<(.*)>/$1/g;
 
-  if (not $query->{helo}) { require Carp; import Carp qw(cluck); cluck ("Mail::SPF::Query: ->new() requires a \"helo\" argument.\n");
-			    $query->{helo} = "";
-			  }
-
-  $query->debuglog("new: ipv4=$query->{ipv4}, sender=$query->{sender}, helo=$query->{helo}");
-
   if (not ($query->{ipv4}   and length $query->{ipv4}))   { die "no IP address given to spfquery"   }
 
   for ($query->{sender}) { s/^\s+//; s/\s+$//; }
 
   ($query->{domain}) = $query->{sender} =~ /([^@]+)$/; # given foo@bar@baz.com, the domain is baz.com, not bar@baz.com.
+
+  if (not $query->{helo}) { require Carp; import Carp qw(cluck); cluck ("Mail::SPF::Query: ->new() requires a \"helo\" argument.\n");
+			    $query->{helo} = $query->{domain};
+			  }
+
+  $query->debuglog("new: ipv4=$query->{ipv4}, sender=$query->{sender}, helo=$query->{helo}");
+
+  ($query->{helo}) =~ s/.*\@//; # strip localpart from helo
 
   if (not $query->{domain}) {
     $query->debuglog("spfquery: sender $query->{sender} has no domain, using HELO domain $query->{helo} instead.");
@@ -396,8 +398,7 @@ sub spfquery {
 
     $query->debuglog("  executing redirect=$new_domain");
 
-    my $inner_query = $query->clone(sender => $query->{localpart} . '@' . $new_domain,
-				    domain => $new_domain,
+    my $inner_query = $query->clone(domain => $new_domain,
 				    depth  => $query->{depth} + 1,
 				    reason => "redirects to $new_domain",
 				   );
@@ -652,6 +653,15 @@ sub myquery {
 
   $query->debuglog("  myquery: doing $qtype query on $label");
 
+  for ($label) {
+    if (/\.\./ or /^\./) {
+      # convert .foo..com to foo.com, etc.
+      $query->debuglog("  myquery: fixing up invalid syntax in $label");
+      s/\.\.+/\./g;
+      s/^\.//;
+      $query->debuglog("  myquery: corrected label is $label");
+    }
+  }
   my $resquery = $query->resolver->query($label, $qtype);
 
   my $errorstring = $query->resolver->errorstring;
@@ -711,8 +721,7 @@ sub mech_include {
 
   $query->debuglog("  mechanism include: recursing into $argument");
 
-  my $inner_query = $query->clone(sender => $query->{localpart} . '@' . $argument,
-				  domain => $argument,
+  my $inner_query = $query->clone(domain => $argument,
 				  depth  => $query->{depth} + 1,
 				  reason => "includes $argument",
 				 );
