@@ -5,8 +5,12 @@ package Mail::SPF::Query;
 #
 # 		       Meng Weng Wong
 #		  <mengwong+spf@pobox.com>
-# $Id: Query.pm,v 1.6 2003/07/24 22:13:34 devel Exp $
+# $Id: Query.pm,v 1.15 2003/11/28 23:20:11 devel Exp $
 # test an IP / sender address pair for pass/fail/nodata/error
+#
+# http://spf.pobox.com/
+#
+# this version is compatible with draft-02.8.txt
 #
 # license: opensource.
 #
@@ -16,23 +20,30 @@ package Mail::SPF::Query;
 use 5.006;
 use strict;
 use warnings;
+no warnings 'uninitialized';
 use vars qw($VERSION $CACHE_TIMEOUT);
+
+use URI::Escape;
+use Net::CIDR::Lite;
+use Net::DNS qw(); # by default it exports mx, which we define.
 
 # ----------------------------------------------------------
 # 		       initialization
 # ----------------------------------------------------------
 
-my @FALLBACKS = qw(spf.mailzone.com);
-my %SEVERITY = (pass => 00, softfail => 05, fail => 10, error => 20, unknown => 50);
-($VERSION) = '$Id: Query.pm,v 1.6 2003/07/24 22:13:34 devel Exp $' =~ /([\d.]{3,})/;
+my $GUESS_MECHS = "a/24 mx/24 ptr exists:%{d}.wl.trusted-forwarder.org";
+
+my @KNOWN_MECHANISMS = qw( a mx ptr include ip4 ip6 exists all );
+
+my $Domains_Queried = {};
+
+$VERSION = "1.8";
 
 $CACHE_TIMEOUT = 120;
 
 # ----------------------------------------------------------
 # 	 no user-serviceable parts below this line
 # ----------------------------------------------------------
-
-use Net::DNS;
 
 my $looks_like_ipv4  = qr/\d+\.\d+\.\d+\.\d+/;
 my $looks_like_email = qr/\S+\@\S+/;
@@ -44,12 +55,19 @@ Mail::SPF::Query - query Sender Permitted From for an IP,email,helo
 =head1 SYNOPSIS
 
   my $query = new Mail::SPF::Query (ip => "127.0.0.1", sender=>'foo@example.com', helo=>"somehost.example.com");
-  my ($result, $comment) = $query->result();
+  my ($result, $smtp_comment, $header_comment) = $query->result();
+  my ($guess,  $smtp_comment, $header_comment) = $query->best_guess();
 
   if    ($result eq "pass")     { ... } # domain is not forged
   elsif ($result eq "fail")     { ... } # domain is forged
   elsif ($result eq "softfail") { ... } # domain may be forged
-  else                          { ... } # domain has not implemented SPF
+  else                          {       # domain has not implemented SPF
+    if    ($guess eq "pass")    { ... } # result based on $guess_mechs
+    elsif ($guess eq "fail")    { ... } # result based on $guess_mechs
+    else                        { ... } #
+  }
+
+  The default $guess_mechs is "a/24 mx/24 ptr exists:%{d}.wl.trusted-forwarder.org".
 
 =head1 ABSTRACT
 
@@ -62,11 +80,13 @@ of an SMTP client IP.
 
 =head2 Mail::SPF::Query->new()
 
-  my $query = eval { new Mail::SPF::Query (ip => "127.0.0.1", sender=>'foo@example.com', helo=>"host.example.com") };
+  my $query = eval { new Mail::SPF::Query (ip    =>"127.0.0.1",
+                                           sender=>'foo@example.com',
+                                           helo  =>"host.example.com") };
 
-                    optional parameters:   fallbacks => ["spf.mailzone.com", ...],
-                                           debug => 1, debuglog => sub { print STDERR "@_\n" },
-                                           no_explicit_wildcard_workaround => 1,
+  optional parameters:
+     guess_mechs => "a/24 mx/24 ptr exists:%{d}.wl.trusted-forwarder.org",
+     debug => 1, debuglog => sub { print STDERR "@_\n" },
 
   if ($@) { warn "bad input to Mail::SPF::Query: $@" }
 
@@ -78,7 +98,10 @@ Set C<debug=E<gt>1> to watch the queries happen.
 sub new {
 # ----------------------------------------------------------
   my $class = shift;
-  my $query = bless { fallbacks=>\@FALLBACKS, @_ }, $class;
+  my $query = bless { guess_mechs => $GUESS_MECHS,
+		      depth => 0,
+		      @_,
+		    }, $class;
 
   $query->{ipv4} = delete $query->{ip}   if $query->{ip}   and $query->{ip} =~ $looks_like_ipv4;
   $query->{helo} = delete $query->{ehlo} if $query->{ehlo};
@@ -93,6 +116,8 @@ sub new {
 
   if (not ($query->{ipv4}   and length $query->{ipv4}))   { die "no IP address given to spfquery"   }
 
+  for ($query->{sender}) { s/^\s+//; s/\s+$//; }
+
   ($query->{domain}) = $query->{sender} =~ /([^@]+)$/; # given foo@bar@baz.com, the domain is baz.com, not bar@baz.com.
 
   if (not $query->{domain}) {
@@ -102,6 +127,13 @@ sub new {
   }
 
   if (not length $query->{domain}) { die "unable to identify domain of sender $query->{sender}" }
+
+  $query->{loop_report} = [$query->{domain}];
+
+  ($query->{localpart}) = $query->{sender} =~ /(.+)\@/;
+  $query->{localpart} ||= "no-spf-sender";
+
+  $query->debuglog("localpart is $query->{localpart}");
 
   $query->{Reversed_IP} = ($query->{ipv4} ? reverse_in_addr($query->{ipv4}) :
 			   $query->{ipv6} ? die "IPv6 not supported" : "");
@@ -118,21 +150,22 @@ sub new {
 C<$result> will be one of C<pass>, C<fail>, C<softfail>, C<unknown>, or C<error>.
 
 C<pass> means the client IP is a designated mailer for the
-sender's domain.  The mail should be accepted subject to
-local policy regarding the sender domain.
+sender.  The mail should be accepted subject to local policy
+regarding the sender.
 
 C<fail> means the client IP is not a designated mailer, and
-the sender domain wants you to reject the transaction for
-fear of forgery.
+the sender wants you to reject the transaction for fear of
+forgery.
 
 C<softfail> means the transaction should be accepted but
 subject to further scrutiny because the domain is still
 transitioning toward SPF adoption.
 
-C<unknown> means the domain does not publish SPF data.
+C<unknown> means the domain either does not publish SPF data
+or has a configuration error in the published data.
 
-C<error> means the DNS lookup encountered an error during
-processing.
+C<error> means the DNS lookup encountered a temporary error
+during processing.
 
 Results are cached internally for a default of 120 seconds.
 You can call C<-E<gt>result()> repeatedly; subsequent
@@ -141,21 +174,117 @@ lookups won't hit your DNS.
 =cut
 
 # ----------------------------------------------------------
-#			    spfmain
+#			    result
 # ----------------------------------------------------------
 
 sub result {
   my $query = shift;
   my %result_set;
 
-  my $search_stack = [$query];
+  my ($result, $smtp_comment) = $query->spfquery();
 
-  my ($result, $text) = $query->spfquery($search_stack);
+  # print STDERR "*** result = $result\n";
 
-  return $result, $text if wantarray;
-  return $result        if not wantarray;
+  $query->{smtp_comment} = $smtp_comment;
+
+  return (lc $result, $smtp_comment, $query->header_comment($result)) if wantarray;
+  return  lc $result;
 }
 
+sub header_comment {
+  my $query = shift;
+  my $result = shift;
+  my $ip = $query->ip;
+  if ($result eq "pass" and $query->{smtp_comment} eq "localhost is always allowed.") { return $query->{smtp_comment} }
+
+  return
+    (  $result eq "pass"     ? "domain of $query->{sender} designates $ip as permitted sender"
+     : $result eq "fail"     ? "domain of $query->{sender} does not designate $ip as permitted sender"
+     : $result eq "softfail" ? "transitioning domain of $query->{sender} does not designate $ip as permitted sender"
+     : $result eq "error"    ? "error in processing during lookup of $query->{sender}"
+     : $result eq "UNKNOWN"  ? "domain of $query->{sender} has SPF misconfiguration"
+     :                         "domain of $query->{sender} does not designate permitted sender hosts" );
+
+}
+
+=head2 $query->best_guess()
+
+  my ($result, $smtp_comment, $header_comment) = $query->best_guess();
+
+When a domain does not publish SPF records, this library can
+produce an educated guess anyway.
+
+It pretends the domain defined A, MX, and PTR mechanisms,
+plus a few others.  The default set of directives is
+
+  "a/24 mx/24 ptr exists:%{d}.wl.trusted-forwarder.org"
+
+That default set will return either "pass" or "unknown".
+
+=cut
+
+sub clone {
+  my $query = shift;
+  my $class = ref $query;
+
+  my %guts = (%$query, @_, parent=>$query);
+
+  my $clone = bless \%guts, $class;
+
+  push @{$clone->{loop_report}}, delete $clone->{reason};
+
+  $query->debuglog("  clone: new object:");
+  for ($clone->show) { $clone->debuglog( "clone: $_" ) }
+
+  return $clone;
+}
+
+sub top {
+  my $query = shift;
+  if ($query->{parent}) { return $query->{parent}->top }
+  return $query;
+}
+
+sub set_error {
+  my $query = shift;
+  $query->{error} = shift;
+}
+
+sub show {
+  my $query = shift;
+
+  return map { sprintf ("%20s = %s", $_, $query->{$_}) } keys %$query;
+}
+
+sub best_guess {
+  my $query = shift;
+
+  # clone the query object with best_guess mode turned on.
+  my $guess_query = $query->clone( best_guess => 1,
+				   reason => "has no data.  best guess",
+				 );
+
+  $guess_query->{depth} = 0;
+
+  # if result is not defined, the domain has no SPF.
+  #    perform fallback lookups.
+  #    perform trusted-forwarder lookups.
+  #    perform guess lookups.
+  #
+  # if result is defined, return it.
+
+  my ($result, $smtp_comment, $header_comment) = $guess_query->result();
+  if (defined $result and $result eq "pass") {
+    my $ip = $query->ip;
+    $header_comment = "seems reasonable for $query->{sender} to mail through $ip";
+    return ($result, $smtp_comment, $header_comment) if wantarray;
+    return $result;
+  }
+
+  return "unknown";
+}
+
+# ----------------------------------------------------------
 
 =head2 $query->debuglog()
 
@@ -171,214 +300,687 @@ sub result {
 sub debuglog {
   my $self = shift;
   return if ref $self and not $self->{debug};
-  if (exists $self->{debuglog} and ref $self->{debuglog} eq "CODE") { eval { $self->{debuglog}->(@_) } ; }
-  else { printf STDERR "%s\n", join (" ", @_); }
+  
+  my $toprint = join (" ", @_);
+  chomp $toprint;
+  $toprint = sprintf ("%-8s %s %s %s",
+		      ("|" x ($self->{depth}+1)),
+		      $self->{localpart},
+		      $self->{domain},
+		      $toprint);
+
+  if (exists $self->{debuglog} and ref $self->{debuglog} eq "CODE") { eval { $self->{debuglog}->($toprint) } ; }
+  else { printf STDERR "%s", "$toprint\n"; }
 }
 
 # ----------------------------------------------------------
 #			    spfquery
 # ----------------------------------------------------------
 
-sub by_severity ($$) { $SEVERITY{$_[0]->[0]} <=> $SEVERITY{$_[1]->[0]} }
-
 sub spfquery {
-  my $self = shift;
-  my $search_stack = shift;
-  my $depth = shift || 0;
+  #
+  # usage: my ($result, $text, $time) = $query->spfquery()
+  #
+  #  performs a full SPF resolution using the data in $query.  to use different data, clone the object.
+  #
+  my $query = shift;
 
-  $self->debuglog("spfquery: $depth --- @{[map { $_->{domain} } @$search_stack]}");
+  if ($query->{ipv4} and
+      $query->{ipv4}=~ /^127\./) { return "pass", "localhost is always allowed." }
 
-  my $query = pop @$search_stack;
+  if ($query->is_looping)            { return "UNKNOWN", "loop encountered: " . $query->loop_report }
+  if ($query->can_use_cached_result) { return $query->cached_result; }
+  else                               { $query->tell_cache_that_lookup_is_underway; }
 
-  my ($lookup_result, $lookup_text, $lookup_time) = $self->lookup($query, $search_stack);
+  my $directive_set = DirectiveSet->new($query->{domain}, $query);
 
-  $self->{Domains_Queried}->{lc $query->{domain}} = [$lookup_result, $lookup_text, $lookup_time];
+  if (not defined $directive_set) {
+    $query->debuglog("no SPF record found for $query->{domain}");
+    $query->delete_cache_point;
+    return "unknown", "domain of sender $query->{sender} does not designate mailers";
+  }
 
-  $self->debuglog("spfquery: $depth <-- result: $lookup_result");
+  if ($directive_set->{hard_syntax_error}) {
+    $query->debuglog("  syntax error while parsing $directive_set->{txt}");
+    $query->delete_cache_point;
+    return "unknown", $directive_set->{hard_syntax_error};
+  }
 
-  if ($lookup_result eq "pass")                    { return $lookup_result, $lookup_text }
-  if (not @$search_stack)                          { return $lookup_result, $lookup_text }
+  $query->{directive_set} = $directive_set;
 
-  # maybe "lookup" pushed some fallback or include domains onto the search stack.
+  foreach my $mechanism ($directive_set->mechanisms) {
+    my ($result, $comment) = $query->evaluate_mechanism($mechanism);
 
-  $self->debuglog("spfquery: $depth ->> recursing with $search_stack->[-1]->{domain} to depth " . ($depth+1));
+    if ($query->{error}) {
+      $query->debuglog("  returning fatal error: $query->{error}");
+      $query->delete_cache_point;
+      return "error", $query->{error};
+    }
 
-  my ($spfquery_result, $spfquery_text, $spfquery_time) = $self->spfquery($search_stack, $depth+1);
+    next if not defined $result;
+    if ($result and $result ne "unknown") {
+      $query->debuglog("  saving result $result to cache point and returning.");
+      $query->save_result_to_cache($result, $comment);
+      return $result, $query->interpolate_explanation($comment);
+    }
+  }
 
-  $self->debuglog("spfquery: $depth -<< recursion complete, now comparing $lookup_result with $spfquery_result");
-  
-  my @sorted_by_severity = sort by_severity my @to_sort = ([  $lookup_result,   $lookup_text,   $lookup_time],
-							   [$spfquery_result, $spfquery_text, $spfquery_time]);
-  my ($result, $text, $time) = @{$sorted_by_severity[0]};
+  # run the redirect modifier
+  if ($query->{directive_set}->redirect) {
+    my $new_domain = $query->macro_substitute($query->{directive_set}->redirect);
 
-  $self->{Domains_Queried}->{lc $query->{domain}} = [$result, $text, $time];
+    $query->debuglog("  executing redirect=$new_domain");
 
-  return $result, $text;
+    my $inner_query = $query->clone(sender => $query->{localpart} . '@' . $new_domain,
+				    domain => $new_domain,
+				    depth  => $query->{depth} + 1,
+				    reason => "redirects to $new_domain",
+				   );
+
+    my @inner_result = $inner_query->spfquery();
+
+    $query->delete_cache_point;
+
+    $query->debuglog("  executed redirect=$new_domain, got result @inner_result");
+
+    return @inner_result;
+  }
+
+  $query->debuglog("  mechanisms returned unknown; deleting cache point and using unknown");
+  $query->delete_cache_point;
+  return "unknown", $directive_set->{soft_syntax_error} || $query->interpolate_explanation();
 }
 
 # ----------------------------------------------------------
-#			    lookup
+# 	      we cache into $Domains_Queried.
 # ----------------------------------------------------------
 
-sub lookup {
-  my $self = shift;
-  my %query = %{shift()};  my $domain = $query{domain};
-  my $search_stack = shift;
+sub cache_point {
+  my $query = shift;
+  return my $cache_point = join "/", ($query->{best_guess} || 0,
+				      $query->{ipv4},
+				      $query->{localpart},
+				      $query->{domain});
+}
 
-  if ($self->{ipv4} =~ /^127\./) { return "pass", "localhost is always allowed.", time }
-  
-  if ($self->{Domains_Queried}->{lc $domain}) { $self->debuglog("  lookup: we have already processed $domain before.");
-						my @cached = @{ $self->{Domains_Queried}->{lc $domain} };
-						if (not defined $CACHE_TIMEOUT
-						    or time - $cached[2] > $CACHE_TIMEOUT) {
-						  $self->debuglog("  lookup: but its cache entry is stale; deleting it.");
-						  delete $self->{Domains_Queried}->{lc $domain};
-						}
-						else {
-						  $self->debuglog("  lookup: the cache entry is fresh; returning it.");
-						  return @cached;
-						}
-					      }
+sub is_looping {
+  my $query = shift;
+  my $cache_point = $query->cache_point;
+  return 1 if (exists $Domains_Queried->{$cache_point}
+	       and
+	       not defined $Domains_Queried->{$cache_point}->[0]);
+  return 0;
+}
 
-  my $querystring = "$self->{Reversed_IP}._smtp_client.$domain";
-  my $resquery = $self->resolver->query($querystring, "TXT");
+sub loop_report {
+  my $query = shift;
+  return join " ", @{$query->{loop_report}};
+}
 
-  $self->debuglog("  lookup:    >  $querystring");
+sub can_use_cached_result {
+  my $query = shift;
+  my $cache_point = $query->cache_point;
 
-  my @toreturn;
-
-  if (! $resquery and ! $self->{no_explicit_wildcard_workaround}) {
-    # 
-    # this could be an RFC1034 strict-conformance issue: on some BINDs,
-    # enclosed domains occlude wildcards.  look up _default._smtp_client instead,
-    # in case the user didn't fully specify *.2.3.4, *.3.4, *.4 = deny in addition to 1.2.3.4 = allow.
-    # 
-    $self->debuglog("  lookup:     X query failed: ", $self->resolver->errorstring);
-
-    my $defaultstring = "_default._smtp_client.$domain";
-    $resquery = $self->resolver->query($defaultstring, "TXT");
-
-    $self->debuglog("  lookup:    >  $defaultstring");
-  }
-
-  if ($resquery) {
-    foreach my $rr ($resquery->answer) { $self->debuglog("  lookup:     < " . $rr->string); }
-
-    # we will automatically get back a CNAME if the domain has no SPF TXT records.
-    if (my ($cname) = grep { $_->type eq "CNAME" } $resquery->answer) {
-      $self->debuglog("  lookup:    C  will use " . $cname->cname . " instead of $domain");
-      push @$search_stack, { %query, domain => $cname->cname, fallback=>undef };
-      return "unknown", "canonicalized to " . $cname->cname, time;
+  if ($Domains_Queried->{$cache_point}) {
+    $query->debuglog("  lookup: we have already processed $query->{domain} before with $query->{ipv4}.");
+    my @cached = @{ $Domains_Queried->{$cache_point} };
+    if (not defined $CACHE_TIMEOUT
+	or time - $cached[2] > $CACHE_TIMEOUT) {
+      $query->debuglog("  lookup: but its cache entry is stale; deleting it.");
+      delete $Domains_Queried->{$cache_point};
+      return 0;
     }
 
-    for my $txt (grep { $_->type eq "TXT" } $resquery->answer) {
-      if (my $passfail = parsetxt($txt->rdatastr)) {
-	if ($passfail eq "pass") {
-	  $self->debuglog("  lookup:    T+ returning pass.");
-	  return @toreturn = ("pass",
-			      ("client " . $self->hostnamed_string($query{ipv4}) . " is designated mailer for domain of sender $query{sender}" .
-			       ($query{fallback} ? " according to $query{fallback}" : "")),
-			      time,
-			      );
-	}
-	
-	if ($passfail eq "softfail" and $query{includehardenfail}) {
-	  $self->debuglog("  lookup:    T- found $passfail; hardening to fail because we're looking up an included domain.");
-	  $passfail = "fail";
-	}
+    $query->debuglog("  lookup: the cache entry is fresh; returning it.");
+    return 1;
+  }
+  return 0;
+}
 
-	if ($passfail eq "softfail") {
-	  $self->debuglog("  lookup:    T- found $passfail.");
-	  @toreturn = ($passfail,
-		       ("client " . $self->hostnamed_string($query{ipv4}) . " is not a designated mailer for transitioning domain of sender $query{sender}" .
-			($query{fallback} ? " according to $query{fallback}" : "")),
-		       time,
-		       );
-	}
-	
-	if ($passfail eq "fail") {
-	  $self->debuglog("  lookup:    T- found $passfail.");
-	  @toreturn = ($passfail,
-		       ("client " . $self->hostnamed_string($query{ipv4}) . " is not a designated mailer for domain of sender $query{sender}" .
-			($query{fallback} ? " according to $query{fallback}" : "")),
-		       time,
-		       );
-	}
+sub tell_cache_that_lookup_is_underway {
+  my $query = shift;
 
-	if ($passfail eq "unknown") {
-	  $self->debuglog("  lookup:    T? found $passfail.");
-	  return @toreturn = ($passfail,
-			      ("domain of sender $query{sender} explicitly declines to participate in SPF" .
-			       ($query{fallback} ? " according to $query{fallback}" : "")),
-			      time,
-			      );
+  # define an entry here so we don't loop endlessly in an Include loop.
+  $Domains_Queried->{$query->cache_point} = [undef, undef, time];
+}
+
+sub save_result_to_cache {
+  my $query = shift;
+  my ($result, $comment) = (shift, shift);
+
+  # define an entry here so we don't loop endlessly in an Include loop.
+  $Domains_Queried->{$query->cache_point} = [$result, $comment, time];
+}
+
+sub cached_result {
+  my $query = shift;
+  my $cache_point = $query->cache_point;
+
+  if ($Domains_Queried->{$cache_point}) {
+    return @{ $Domains_Queried->{$cache_point} };
+  }
+  return;
+}
+
+sub delete_cache_point {
+  my $query = shift;
+  delete $Domains_Queried->{$query->cache_point};
+}
+
+sub clear_cache {
+  $Domains_Queried = {};
+}
+
+sub get_ptr_domain {
+    my ($query) = shift;
+
+    return $query->{ptr_domain} if ($query->{ptr_domain});
+    
+    foreach my $ptrdname ($query->myquery(reverse_in_addr($query->{ipv4}) . ".in-addr.arpa", "PTR", "ptrdname")) {
+        $query->debuglog("  get_ptr_domain: $query->{ipv4} is $ptrdname");
+    
+        $query->debuglog("  get_ptr_domain: checking hostname $ptrdname for legitimacy.");
+    
+        # check for legitimacy --- PTR -> hostname A -> PTR
+        foreach my $ptr_to_a ($query->myquery($ptrdname, "A", "address")) {
+          
+            $query->debuglog("  get_ptr_domain: hostname $ptrdname -> $ptr_to_a");
+      
+            if ($ptr_to_a eq $query->{ipv4}) {
+                return $query->{ptr_domain} = $ptrdname;
+            }
+        }
+    }
+
+    return undef;
+}
+
+# 7.1 Macro definitions
+# 
+#    Certain directives perform macro interpolation on their arguments.
+# 
+#      macro-string = *( macro-char / VCHAR )
+#      macro-char   = ( '%{' alpha *digit [ 'r' ] *delim '}' )
+#                     / '%%'
+#                     / '%_'
+#                     / '%-'
+# 
+#    A literal '%' is expressed by '%%'.
+#    %_ expands to a single " " space.
+#    %- expands to a URL-encoded space, viz. "%20".
+# 
+#    Mechanism directives expand the following macro letters:
+# 
+#       u = local-part of current-sender
+#       l = local-part of current-sender
+#       d = current-domain
+#       i = SMTP client IP
+#       p = SMTP client domain name
+#       v = client IP version string - in-addr for ipv4 or ip6 for ipv6
+# 
+#    In Explanation records, all of the above macros are expanded, and the
+#    following as well:
+# 
+#       h = HELO/EHLO domain
+#       s = current-sender
+#       t = current timestamp in UTC epoch seconds notation
+# 
+#    The uppercase versions of those macros are URL-encoded.
+# 
+#    A '%' character not followed by a '{', '%', '-', or '_' character
+#    MUST be interpreted
+#    as a literal.  SPF publishers SHOULD NOT rely on this feature; they
+#    MUST escape % literals.  For example, an explanation TXT record
+#       Your spam ratio has increased by 581%
+#    is incorrect.  Instead, say
+#       Your spam ratio has increased by 581%%
+# 
+#    Legal modifiers are
+# 
+#         'r'    ; reverse value, splitting on dots by default
+#         *DIGIT ; one or more digits
+# 
+#    Modifiers may be suffixed by one or more splitting characters.
+#    If none are present, the default is a "." dot.  Splitting characters
+#    MUST be non-alphanumeric.
+# 
+#    The 'r' modifier indicates a reversal operation: if the client IP
+#    address were 192.0.2.1, the macro %{i} would expand to "192.0.2.1"
+#    and the macro %{ir} would expand to "1.2.0.192".
+# 
+#    The DIGITs modifier indicates the number of right-hand parts to use
+#    after optional reversal.  The modifier MUST be nonzero.  If the
+#    DIGITs specify more parts than are available, all the available parts
+#    are used.  If the DIGIT was 5, and only 3 parts were available, the
+#    macro interpreter would pretend the DIGIT was 3.
+# 
+#    If both the DIGITs and the 'r' modifier are used, DIGITs must go
+#    first, and 'r' second.
+# 
+#    For the "u" and "s" macros: when the local-part has no length, the
+#    string "mailer-daemon" will be used instead.  If the splitting
+#    characters include a "-", "mailer-daemon" will be split accordingly.
+#    After splitting, parts are always rejoined using "." and not the
+#    original splitting characters.
+# 
+#    The "p" macro expands to the validated domain name of the SMTP
+#    client.  The validation procedure is described in section 3.3.
+#    If there are no validated domain names, the word "unknown" is
+#    substituted.  If multiple validated domain names exist, one of
+#    them is chosen.
+# 
+#    If the result of macro expansion exceeds 255 characters (the maximum
+#    length of a domain name), the left side is truncated and the right
+#    side preserved.
+# 
+# 7.2 Expansion Examples
+# 
+#    The <current-sender> is strong-bad@email.example.com.
+#    The IPv4 SMTP client IP is 192.0.2.3.
+#    The IPv6 SMTP client IP is 5f05:2000:80ad:5800::1.
+#    The PTR domain name of the client IP is mx.exmaple.org.
+# 
+#    macro                 expansion
+#    -------------------------------
+#    %{d}          email.example.com
+#    %{d4}         email.example.com
+#    %{d3}         email.example.com
+#    %{d2}               example.com
+#    %{d1}                       com
+#    %{p}             mx.example.org
+#    %{p2}               example.org
+#    %{dr}         com.example.email
+#    %{d2r}            example.email
+#    %{u}                 strong-bad
+#    %{u-}                strong.bad
+#    %{ur}                strong-bad
+#    %{ur-}               bad.strong
+#    %{u1r-}                  strong
+# 
+#    macro-string                                   expansion
+#    ---------------------------------------------------------------------
+#    %{ir}.${v}._spf.%{d2}              3.2.0.192.in-addr._spf.example.com
+#    %{ur-}.lp._spf.%{d2}                   bad.strong.lp._spf.example.com
+# 
+#    %{ur-}.lp.%{ir}.${v}._spf.%{d2}
+#                         bad.strong.lp.3.2.0.192.in-addr._spf.example.com
+# 
+#    %{ir}.${v}.%{u1r-}.lp._spf.%{d2}
+#                             3.2.0.192.in-addr.strong.lp._spf.example.com
+# 
+#    %{p2}.trusted-domains.example.net
+#                                  example.org.trusted-domains.example.net
+# 
+#    %{p2}.trusted-domains.example.net
+#                                  example.org.trusted-domains.example.net
+# 
+#    IPv6:
+#    %{ir}.example.org              1.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.8.
+#                                    5.d.a.0.8.0.0.0.2.5.0.f.5.example.org
+# 
+
+sub macro_substitute_item {
+    my $query = shift;
+    my $arg = shift;
+
+    if ($arg eq "%") { return "%" }
+    if ($arg eq "_") { return " " }
+    if ($arg eq "-") { return "%20" }
+
+    $arg =~ s/^{(.*)}$/$1/;
+
+    my ($field, $num, $reverse, $delim) = $arg =~ /^(\w)(\d*)(r?)(.*)$/;
+
+    $delim = '.' if not length $delim;
+
+    my $newval = $arg;
+    my $timestamp = time;
+
+    $newval = $query->{localpart}       if (lc $field eq 'l');
+    $newval = $query->{localpart}       if (lc $field eq 'u');
+    $newval = $query->{sender}          if (lc $field eq 's');
+    $newval = $query->{domain}          if (lc $field eq 'd');
+    $newval = $timestamp                if (lc $field eq 't');
+    $newval = $query->{helo}            if (lc $field eq 'h');
+    $newval = $query->ip                if (lc $field eq 'i');
+    $newval = $query->get_ptr_domain    if (lc $field eq 'p');
+    $newval = $query->{ipv4} ? 'in-addr' : 'ip6'
+                                        if (lc $field eq 'v');
+
+    # perl has a few rules about where ] and - may fall inside a character class.
+    if ($delim =~ s/_//g)  { $delim .= "-" }
+    if ($delim =~ s/\]//g) { $delim = "]$delim" }
+
+    if ($reverse) {
+      my @parts = split /[$delim]/, $newval;
+      $newval = join ".", reverse @parts;
+    }
+
+    if ($num) {
+      my @parts = split /[$delim]/, $newval;
+      while (@parts > $num) { shift @parts }
+      $newval = join ".", @parts;
+    }
+
+    $newval = uri_escape($newval)       if ($field eq uc $field);
+
+    $query->debuglog("  macro_substitute_item: $arg: field=$field, num=$num, reverse=$reverse, delim=$delim, newval=$newval");
+
+    return $newval;
+}
+
+sub macro_substitute {
+    my $query = shift;
+    my $arg = shift;
+    my $maxlen = shift;
+
+    my $original = $arg;
+
+#      macro-char   = ( '%{' alpha *digit [ 'r' ] *delim '}' )
+#                     / '%%'
+#                     / '%_'
+#                     / '%-'
+
+    $arg =~ s/%([%_-]|{(\w[^}]*)})/$query->macro_substitute_item($1)/ge;
+
+    if ($maxlen && length $arg > $maxlen) {
+      $arg = substr($arg, -$maxlen);  # super.long.string -> er.long.string
+      $arg =~ s/[^.]*\.//;            #    er.long.string ->    long.string
+    }
+    $query->debuglog("  macro_substitute: $original -> $arg") if ($original ne $arg);
+    return $arg;
+}
+
+# ----------------------------------------------------------
+#		     evaluate_mechanism
+# ----------------------------------------------------------
+
+sub evaluate_mechanism {
+  my $query = shift;
+  my ($modifier, $mechanism, $argument) = @{shift()};
+
+  $modifier = "+" if not length $modifier;
+
+  $query->debuglog("  evaluate_mechanism: $modifier$mechanism($argument) for domain=$query->{domain}");
+
+  if ({ map { $_=>1 } @KNOWN_MECHANISMS }->{$mechanism}) {
+    my $mech_sub = "mech_$mechanism";
+    my ($hit, $text) = $query->$mech_sub($query->macro_substitute($argument, 255));
+
+    return if not $hit;
+
+    return ($hit, $text) if ($hit ne "hit");
+
+    return $query->shorthand2value($modifier), $text;
+  }
+  else {
+    $query->debuglog("  evaluate_mechanism: unrecognized mechanism $mechanism, returning unknown.");
+    return UNKNOWN => "unrecognized mechanism $mechanism";
+    return undef;
+  }
+
+  return ("unknown", "evaluate-mechanism: unknown");
+}
+
+# ----------------------------------------------------------
+# 	     myquery wraps DNS resolver queries
+#
+# ----------------------------------------------------------
+
+sub myquery {
+  my $query = shift;
+  my $label = shift;
+  my $qtype = shift;
+  my $method = shift;
+  my $sortby = shift;
+
+  $query->debuglog("  myquery: doing $qtype query on $label");
+
+  my $resquery = $query->resolver->query($label, $qtype);
+
+  my $errorstring = $query->resolver->errorstring;
+  if (not $resquery and $errorstring eq "NOERROR") {
+    return;
+  }
+
+  if (not $resquery) {
+    if ($errorstring eq "NXDOMAIN") {
+      $query->debuglog("  myquery: $label $qtype failed: NXDOMAIN.");
+      return;
+    }
+
+    $query->debuglog("  myquery: $label $qtype lookup error: $errorstring");
+    $query->debuglog("  myquery: will set top-level error condition.");
+    $query->top->set_error("DNS error while looking up $label $qtype: $errorstring");
+    return;
+  }
+
+  my @answers = grep { lc $_->type eq lc $qtype } $resquery->answer;
+
+  # $query->debuglog("  myquery: found $qtype response: @answers");
+
+  my @toreturn;
+  if ($sortby) { @toreturn = map { $_->$method() } sort { $a->$sortby() <=> $b->$sortby() } @answers; }
+  else         { @toreturn = map { $_->$method() }                                          @answers; }
+
+  if (not @toreturn) {
+    $query->debuglog("  myquery: result had no data.");
+    return;
+  }
+
+  return @toreturn;
+}
+
+# ----------------------------------------------------------
+# 			    all
+# ----------------------------------------------------------
+
+sub mech_all {
+  my $query = shift;
+  return "hit";
+}
+
+# ----------------------------------------------------------
+#			  include
+# ----------------------------------------------------------
+
+sub mech_include {
+  my $query = shift;
+  my $argument = shift;
+
+  if (not $argument) {
+    $query->debuglog("  mechanism include: no argument given.");
+    return "unknown", "include mechanism not given an argument";
+  }
+
+  $query->debuglog("  mechanism include: recursing into $argument");
+
+  my $inner_query = $query->clone(sender => $query->{localpart} . '@' . $argument,
+				  domain => $argument,
+				  depth  => $query->{depth} + 1,
+				  reason => "includes $argument",
+				 );
+
+  my ($result, $text, $time) = $inner_query->spfquery();
+
+  $query->debuglog("  mechanism include: got back result $result / $text / $time");
+
+  if (   $result eq "pass")    { return hit     => $text, $time; }
+  if (   $result eq "error")   { return error   => $text, $time; }
+  if (lc $result eq "unknown") { return UNKNOWN => $text, $time; }
+  
+  $query->debuglog("  mechanism include: reducing result $result to unknown");
+  return "unknown", $text, $time;
+}
+
+# ----------------------------------------------------------
+# 			     a
+# ----------------------------------------------------------
+
+sub mech_a {
+  my $query = shift;
+  my $argument = shift;
+  
+  my $ip4_cidr_length = ($argument =~ s/  \/(\d+)//x) ? $1 : 32;
+  my $ip6_cidr_length = ($argument =~ s/\/\/(\d+)//x) ? $1 : 128;
+
+  my $domain_to_use = $argument || $query->{domain};
+
+  # see code below in ip4
+  foreach my $a ($query->myquery($domain_to_use, "A", "address")) {
+    $query->debuglog("  mechanism a: $a");
+    if ($a eq $query->{ipv4}) {
+      $query->debuglog("  mechanism a: match found: $domain_to_use A $a == $query->{ipv4}");
+      return "hit", "$domain_to_use A $query->{ipv4}";
+    }
+    elsif ($ip4_cidr_length < 32) {
+      my $cidr = Net::CIDR::Lite->new("$a/$ip4_cidr_length");
+
+      $query->debuglog("  mechanism a: looking for $query->{ipv4} in $a/$ip4_cidr_length");
+      
+      return (hit => "$domain_to_use A $a /$ip4_cidr_length contains $query->{ipv4}")
+	if $cidr->find($query->{ipv4});
+    }
+  }
+  return;
+}
+
+# ----------------------------------------------------------
+# 			     mx
+# ----------------------------------------------------------
+
+sub mech_mx {
+  my $query = shift;
+  my $argument = shift;
+
+  my $ip4_cidr_length = ($argument =~ s/  \/(\d+)//x) ? $1 : 32;
+  my $ip6_cidr_length = ($argument =~ s/\/\/(\d+)//x) ? $1 : 128;
+
+  my $domain_to_use = $argument || $query->{domain};
+
+  foreach my $mx ($query->myquery($domain_to_use, "MX", "exchange", "preference")) {
+    # $query->debuglog("  mechanism mx: $mx");
+
+    foreach my $a ($query->myquery($mx, "A", "address")) {
+      if ($a eq $query->{ipv4}) {
+	$query->debuglog("  mechanism mx: we have a match; $domain_to_use MX $mx A $a == $query->{ipv4}");
+	return "hit", "$domain_to_use MX $mx A $a";
+      }
+      elsif ($ip4_cidr_length < 32) {
+	my $cidr = Net::CIDR::Lite->new("$a/$ip4_cidr_length");
+
+	$query->debuglog("  mechanism mx: looking for $query->{ipv4} in $a/$ip4_cidr_length");
+
+	return (hit => "$domain_to_use MX $mx A $a /$ip4_cidr_length contains $query->{ipv4}")
+	  if $cidr->find($query->{ipv4});
+
+      }
+    }
+  }
+  return;
+}
+
+# ----------------------------------------------------------
+# 			    ptr
+# ----------------------------------------------------------
+
+sub mech_ptr {
+  my $query = shift;
+  my $argument = shift;
+
+  if ($query->{ipv6}) { return "unknown", "ipv6 not yet supported"; }
+
+  my $domain_to_use = $argument || $query->{domain};
+
+  foreach my $ptrdname ($query->myquery(reverse_in_addr($query->{ipv4}) . ".in-addr.arpa", "PTR", "ptrdname")) {
+    $query->debuglog("  mechanism ptr: $query->{ipv4} is $ptrdname");
+    
+    $query->debuglog("  mechanism ptr: checking hostname $ptrdname for legitimacy.");
+    
+    # check for legitimacy --- PTR -> hostname A -> PTR
+    foreach my $ptr_to_a ($query->myquery($ptrdname, "A", "address")) {
+      
+      $query->debuglog("  mechanism ptr: hostname $ptrdname -> $ptr_to_a");
+      
+      if ($ptr_to_a eq $query->{ipv4}) {
+	$query->debuglog("  mechanism ptr: we have a valid PTR: $query->{ipv4} PTR $ptrdname A $ptr_to_a");
+	$query->debuglog("  mechanism ptr: now we see if $ptrdname ends in $domain_to_use.");
+	
+	if ($ptrdname =~ /(^|\.)\Q$domain_to_use\E$/i) {
+	  $query->debuglog("  mechanism ptr: $query->{ipv4} PTR $ptrdname does end in $domain_to_use.");
+	  return hit => "$query->{ipv4} PTR $ptrdname matches $domain_to_use";
+	}
+	else {
+	  $query->debuglog("  mechanism ptr: $ptrdname does not end in $domain_to_use.  no match.");
 	}
       }
     }
-
-    my @includes = map { $_->rdatastr =~ /^"?spfinclude=(\S+?)"?$/i } $resquery->answer;
-    @includes = reverse sort sort_includes @includes;
-
-    $self->debuglog("  lookup:    TI pushing on search stack: @includes") if @includes;
-    push @$search_stack, map { { %query, (domain => /(.+?):/ ? $1 : $_), includehardenfail=>1 } } @includes;
-
-    return @toreturn if @toreturn;
-    
-    return "unknown", "no data received for $query{domain}", time;
   }
+  return;
+}
 
-  $self->debuglog("  lookup:     X query failed: ", $self->resolver->errorstring);
+# ----------------------------------------------------------
+# 			     exists
+# ----------------------------------------------------------
 
-  #
-  # now, fall-back if we didn't get any data.
-  # 
+sub mech_exists {
+  my $query = shift;
+  my $argument = shift;
 
-  if (not $query{fallback} and $self->fallbacks) {
-    # $self->debuglog("lookup: falling back using", $self->fallbacks);
-    push @$search_stack, map { { %query, domain => "$query{domain}.$_", fallback => $_ } } $self->fallbacks;
+  return if (!$argument);
+
+  my $domain_to_use = $argument;
+
+  $query->debuglog("  mechanism exists: looking up $domain_to_use");
+  
+  foreach ($query->myquery($domain_to_use, "A", "address")) {
+    $query->debuglog("  mechanism exists: $_");
+    $query->debuglog("  mechanism exists: we have a match.");
+    return hit => "$domain_to_use found";
   }
+  return;
+}
 
-  return ("unknown", "domain of sender $query{sender} does not designate mailers: " . $self->resolver->errorstring .
-	  ($query{fallback} ? " according to $query{fallback}" : ""),
-	  time,
-	 );
+# ----------------------------------------------------------
+# 			    ip4
+# ----------------------------------------------------------
 
+sub mech_ip4 {
+  my $query = shift;
+  my $cidr_spec = shift;
+
+  return if not length $cidr_spec;
+
+  my $cidr = Net::CIDR::Lite->new($cidr_spec); # TODO: sanity check input, make this work for ipv6 as well
+
+  $query->debuglog("  mechanism ip4: looking for $query->{ipv4} in $cidr_spec");
+
+  return (hit => "$cidr_spec contains $query->{ipv4}") if $cidr->find($query->{ipv4});
+
+  return;
+}
+
+# ----------------------------------------------------------
+# 			    ip6
+# ----------------------------------------------------------
+
+sub mech_ip6 {
+  my $query = shift;
+
+  return;
 }
 
 # ----------------------------------------------------------
 # 			 functions
 # ----------------------------------------------------------
 
-sub parsetxt {
-  my $txt = shift;
-  $txt =~ s/^"(.*)"$/$1/;
-  my ($key, $value) = $txt =~ /^(spf\d*|dmp)\s*=(\S+)/i or return;
-  return "pass" if ($value =~ /\b(allow|pass|ok|permit)\b/i);
-  return "softfail" if ($value =~ /\b(softfail|softdeny)\b/i);
-  return "fail" if $value =~ /\b(fail|deny)\b/i;
-}
-
-sub hostnamed_string {
-  my $self = shift;
-  my $ip = shift;
-  my $query = $ip =~ $looks_like_ipv4 ? $self->resolver->query(reverse_in_addr($ip).".arpa", "PTR") : return; # ipv6 goes here
-  if (not $query) {
-    # $self->debuglog("     ptr:       unable to PTR $ip");
-    return "unknown[$ip]";
-  }
-  my ($hostname) = map { $_->type eq "PTR" ? $_->ptrdname : () } $query->answer;
-  return (($hostname || "unknown") . "[$ip]");
+sub ip { # accessor
+  my $query = shift;
+  return $query->{ipv4} || $query->{ipv6};
 }
 
 sub reverse_in_addr {
-  return join (".", (reverse split /\./, shift), "in-addr");
-}
-
-sub sort_includes ($$) {
-  my ($a_name, $a_priority) = split /\|/, shift;    $a_priority ||= 0;
-  my ($b_name, $b_priority) = split /\|/, shift;    $b_priority ||= 0;
-
-  return $a_priority <=> $b_priority;
+  return join (".", (reverse split /\./, shift));
 }
 
 sub resolver {
@@ -391,95 +993,46 @@ sub fallbacks {
   return @{$query->{fallbacks}};
 }
 
+sub shorthand2value {
+  my $query = shift;
+  my $shorthand = shift;
+  return { "-" => "fail",
+	   "+" => "pass",
+	   "~" => "softfail",
+	   "?" => "unknown" } -> {$shorthand} || $shorthand;
+}
+
+sub value2shorthand {
+  my $query = shift;
+  my $value = lc shift;
+  return { "fail"     => "-",
+	   "pass"     => "+",
+	   "softfail" => "~",
+	   "deny"     => "-",
+	   "allow"    => "+",
+	   "softdeny" => "~",
+	   "unknown"  => "?" } -> {$value} || $value;
+}
+
+sub interpolate_explanation {
+  my $query = shift;
+  my $comment = shift;
+
+  my $exp;
+  if ($query->{directive_set}->explanation) {
+    my @txt = map { s/^"//; s/"$//; $_ } $query->myquery($query->macro_substitute($query->{directive_set}->explanation), "TXT", "txtdata");
+    $exp = $query->macro_substitute(join " ", @txt);
+  }
+
+  if (not $exp) { return $comment }
+  if (not $comment) { return $exp }
+
+  return "$exp: $comment";
+}
+
 # ----------------------------------------------------------
 # 		      algo
 # ----------------------------------------------------------
-
-=head1 Regarding Explicit Wildcards
-
-We expect an SPF-conformant nameserver to respond with an
-"spf=allow/deny/softdeny" response when we query
-C<reversed-ip.in-addr._smtp_client.host.example.com> and
-C<reversed-ip.in-addr._smtp_client.example.com>.  If we
-receive an NXDOMAIN response upon the initial query, we will
-try to find a default status by querying
-C<_default._smtp_client>.  This behaviour will be removed in
-future releases.  See
-http://spf.pobox.com/explicit_wildcards.html for more
-information.
-
-=head1 Algorithm
-
-input: SEARCH_STACK   = ([domain_name, is_fallback], ...)
-
-returns: one of PASS | SOFTFAIL | FAIL | UNKNOWN | ERROR , TEXT
-
-data: LOOKUP_RESULT   = PASS | FAIL | UNKNOWN | ERROR , TEXT
-      SPFQUERY_RESULT = PASS | FAIL | UNKNOWN | ERROR , TEXT
-
-pop a DOMAIN off the top of the stack and run
-
-  LOOKUP_RESULT, LOOKUP_TEXT = LOOKUP(DOMAIN, SEARCH_STACK).
-
-as a side effect, LOOKUP may push new domains onto the top
-of the SEARCH_STACK on the basis of SPFinclude replies.
-
-They will be pushed with the attribute includehardenfail=1,
-because SOFTDENY makes everything more complicated.  It
-should be relevant for the top-level search but not in any
-included domains.
-
-If LOOKUP returns a PASS, a FAIL, or a SOFT_FAIL,
-short-circuit the query by returning LOOKUP_RESULT,
-LOOKUP_TEXT immediately.  That result will propagate all the
-way back up the recursion stack.
-
-If LOOKUP found any includes, try the includes also before
-returning the current value.
-
-If the search stack is empty, return the LOOKUP_RESULT, LOOKUP_TEXT.
-
-To exhaust the search stack, we will recurse:
-
-  SPFQUERY_RESULT, SPFQUERY_TEXT = SPFQUERY(SEARCH_STACK)
-
-return the severer of LOOKUP_RESULT vs SPFQUERY_RESULT,
-together with the appropriate TEXT.  Severity is defined
-according to the following table:
-
-     PASS	 
-     FAIL	 
-     SOFTFAIL	 
-     ERROR	 
-     UNKNOWN    
-
-SEARCH ALGORITHM: lookup
-
-global IP
-global DOMAINS_QUERIED
-
-lookup(DOMAIN, SEARCH_STACK):
-
-Pop a domain off the top of the stack.
-
-Have we queried this domain already?  If so, return nothing.
-
-Perform a TXT query.  If the result contains
-
-  CNAME: push the CNAME's target onto the SEARCH_STACK and return nothing.
-  TXT SPF=allow: return PASS.
-  TXT SPFinclude=domain.com: push all matching domain.com onto the SEARCH_STACK in reverse order of their [:priority].
-  TXT SPF=fail: return FAIL.  spfquery will try the includes before using the FAIL response.
-  TXT SPF=softfail: return SOFTFAIL.  spfquery will try the includes before using the FAIL response.
-
-If the query failed or returned unknown, if the domain IS NOT FALLBACK,
-
-  push the fallback versions of the current domain onto the
-  top of the search stack:
-
-    SEARCH_STACK = SEARCH_STACK map { "domain_name.$_" } FALLBACK_LIST
-
-Then return unknown.
 
 =head2 EXPORT
 
@@ -493,10 +1046,130 @@ Meng Weng Wong, <mengwong+spf@pobox.com>
 
 http://spf.pobox.com/
 
-http://develooper.com/code/qpsmtpd/ is a Perl replacement
-for qmail-smtpd.  It also works as a Postfix content-filter
-and smtpd proxy pass-through.  qpsmtpd supports SPF.
-
 =cut
+
+{
+  package DirectiveSet;
+  
+  sub new {
+    my $class = shift;
+    my $current_domain = shift;
+    my $query = shift;
+
+    my $txt;
+
+    if ($query->{best_guess}) {
+      $txt = "v=spf1 $query->{guess_mechs} ?all";
+    }
+    else {
+      $query->debuglog("  DirectiveSet->new(): doing TXT query on $current_domain");
+      my @txt = $query->myquery($current_domain, "TXT", "txtdata");
+
+      # squish multiline responses into one first.
+
+      foreach (@txt) {
+	s/^"(.*)"$/$1/;
+	s/^\s+//;
+	s/\s+$//;
+	
+	if (/^v=spf1(\s.*)/i) {
+	  $txt .= $1;
+	}
+      }
+    }
+
+    $query->debuglog("  DirectiveSet->new(): SPF policy: $txt");
+
+    return if not $txt;
+
+    my $directive_set = bless { txt => $txt } , $class;
+
+    TXT_RESPONSE:
+    for ($txt) {
+      $query->debuglog("  lookup:   TXT $_");
+
+      # parse the policy record
+      while (/\S/) {
+	s/^\s*(\S+)\s*//;
+	my $word = $1;
+	# $query->debuglog("  lookup:  word parsing word $word");
+	if ($word =~ /^v=(\S+)/i) {
+	  my $version = $1;
+	  $query->debuglog("  lookup:   TXT version=$version");
+	  $directive_set->{version} = $version;
+	  next TXT_RESPONSE if ($version ne "spf1");
+	  next;
+	}
+
+	# RHS optional, defaults to domain.
+	# [:/] matches a:foo and a/24
+	if (my ($prefix, $lhs, $rhs) = $word =~ /^([-~+?]?)(all|include|a|mx|ptr|pi|ip4|ip6|exists)([\/:]\S*)?/i) {
+	  $rhs =~ s/^://;
+	  $prefix ||= "+";
+	  $query->debuglog("  lookup:   TXT prefix=$prefix, lhs=$lhs, rhs=$rhs");
+	  push @{$directive_set->{mechanisms}}, [$prefix => lc $lhs => $rhs];
+	  next;
+	}
+
+	# modifiers
+	if (my ($lhs, $rhs) = $word =~ /^(default|exp|redirect)=(\S+)?/i) {
+	  $lhs = lc $lhs;
+
+	  # $query->debuglog("  lookup:   TXT $lhs = $rhs");
+
+	  # repeat definitions of a modifier are a hard syntax error.
+	  if (defined $directive_set->{$lhs}) {
+	    $directive_set->{hard_syntax_error} = "spf error: $lhs may not be defined more than once";
+	    $query->debuglog("  lookup:   hard syntax error: $directive_set->{hard_syntax_error}");
+	    last;
+	  }
+
+	  if ($lhs eq "default") {
+	    if ($rhs =~ /^(unknown|deny|softdeny|allow)$/i) {
+	      push @{$directive_set->{mechanisms}}, [ $query->value2shorthand($rhs), all => undef ];
+	    }
+	    else {
+	      # ignore unknown modifiers.
+	      $directive_set->{soft_syntax_error} = "spf error: \"$lhs=$rhs\" not understood";
+	    }
+	  }
+
+	  if ($lhs eq "exp")      { $directive_set->{exp}      = $rhs; }
+	  if ($lhs eq "redirect") { $directive_set->{redirect} = $rhs; }
+
+	  next;
+	}
+
+	# extension mechanism
+	{
+	  # $query->debuglog("  lookup:   TXT some kind of extension found: $word");
+	  my ($lhs, $rhs) = split /=/, $word, 2;
+	  # $query->debuglog("  lookup:   TXT extension: $lhs : $rhs");
+	  push @{$directive_set->{modifiers}}, [lc $lhs => $rhs];
+	  next;
+	}
+      }
+
+      $directive_set->{mechanisms} = []           if not $directive_set->{mechanisms};
+      $directive_set->{exp}        = undef        if not $directive_set->{exp};
+
+      $query->debuglog("  lookup:  mec mechanisms=@{[$directive_set->show_mechanisms]}");
+      $query->debuglog("  lookup:  exp exp=$directive_set->{exp}");
+
+      return $directive_set;
+    }
+  }
+
+  sub version      {   shift->{version}      }
+  sub mechanisms   { @{shift->{mechanisms}}  }
+  sub explanation  {   shift->{exp}          }
+  sub redirect     {   shift->{redirect}     }
+  sub syntax_error {   shift->{syntax_error} }
+
+  sub show_mechanisms   {
+    my $directive_set = shift;
+    return map { $_->[0] . $_->[1] . "(" . ($_->[2]||"") . ")" } $directive_set->mechanisms;
+  }
+}
 
 1;
