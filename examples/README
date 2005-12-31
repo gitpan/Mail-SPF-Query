@@ -1,7 +1,3 @@
-* README
-
-  describes the files under sample/
-
 * sendmail-milter
 
   If you run sendmail, this milter will plug right in.
@@ -23,11 +19,5 @@
 
 * postfix-policyd-spf
 
-  If you run a recent snapshot version of Postfix, this policy
-  server will plug right in.  You don't need to run spfd.
-
-* spf.py
-
-  Python implementation.  This may not be the latest version.
-  Check http://www.wayforward.net/spf/
-
+  If you run a recent version of Postfix, this policy server
+  will plug right in.  You don't need to run spfd.

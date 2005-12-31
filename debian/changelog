@@ -1,0 +1,127 @@
+libmail-spf-query-perl (1.998) unstable; urgency=low
+
+  Debian:
+  * New maintainer: Julian Mehnle <julian@mehnle.net>.
+  * Unversioned Build-Depends and Depends on liburi-perl.
+  * Updated package description.
+  * Cleaned up debian/rules.
+  * Updated copyright file to reflect new Debian and upstream maintainership.
+  * spfquery man-page has been included (and updated) upstream.
+
+  Mail::SPF::Query:
+  * Removed obsolete Caller-ID support (closes: #337319, #337500).
+  * Always use Sys::Hostname::Long. And thus, depend on libsys-hostname-long
+    (closes: #332952, #342629).
+  * Changed local machine hostname macro from "xr" to "r" (closes rt.cpan.org
+    bug #9744).
+  * Restrict the number of SPF record lookups to a maximum of 10 (was: 20).
+    Thanks to Craig Whitmore!
+  * Fixes to mechanisms implementation:
+    * a, mx: Check if domain is a valid FQDN, i.e. ends in ".<toplabel>".
+    * ip4: Return "unknown" (PermError) if no argument was specified. Also,
+      don't auto-complete "1.2.3" CIDR specs to "1.2.3.0", as such an
+      abbreviated syntax is forbidden by the SPF spec anyway.
+    Thanks to Craig Whitmore!
+  * Lots of minor code and documentation fixes/improvements.
+
+  spfd:
+  * Added complete POD documentation/man-page.
+  * Both "--xxx" and "-xxx" forms of command-line options are now supported.
+  * Renamed most of the command-line options:
+      --path       => --socket
+      --pathuser   => --socket-user
+      --pathgroup  => --socket-group
+      --pathmode   => --socket-perms
+      --setuser    => --set-user
+      --setgroup   => --set-group
+    The old option names are still supported for backwards compatibility.
+  * Do not print usage information when neither "--port" nor "--socket" are
+    specified (i.e. when the default TCP port would just be used).  Print a
+    more specific hint instead.
+  * Added "--help" option to print usage information.
+  * Some minor code fixes/improvements.
+
+  spfquery:
+  * Added complete POD documentation/man-page.
+  * Both "--xxx" and "-xxx" forms of command-line options are now supported.
+    Also, a "-x" (short) form is now supported for the most important options.
+  * Renamed the "--max-lookup" option to "--max-lookup-count" to match the
+    Mail::SPF::Query API.  "--max-lookup" is still supported for backwards
+    compatibility.
+  * Added "--mail-from" and "-m" synonyms for the "--sender" option for
+    consistency with the "--helo" option.
+  * Cleaned up the "--help" usage output.
+  * Lots of minor code improvements.
+
+  Tests:
+  * Some minor tests improvements.
+  * Turned test.pl into .t file in t/ directory, so testing output is parsed
+    (closes rt.cpan.org bug #7748).
+  * Plan the correct number of tests, not just the number of non-comment lines
+    in test data file.
+
+  Miscellaneous:
+  * Updated URLs everywhere:
+      http://spf.pobox.com                           -> http://www.openspf.org
+      http://www.anarres.org/projects/srs/           -> http://www.libsrs2.org
+      http://asarian-host.net/srs/sendmailsrs.htm
+                                  -> http://srs-socketmap.info/sendmailsrs.htm
+  * Point out everywhere the "non-standard"-ness of best guess processing,
+    trusted forwarder accreditation checking, and several other features.
+  * Cleaned up source package file and directory layout:
+      Query.pm     -> lib/Mail/SPF/Query.pm
+      Changes      -> CHANGES
+      test.*       -> t/
+      spf{d,query} -> bin/
+      sample/      -> examples/
+  * postfix-policyd-spf:
+    * Generate "Received-SPF:" header unless rejecting (fail/Fail) or deferring
+      (error/TempError) the message.
+    * Verbose mode is disabled by default.
+    Thanks to Arjen de Korte!
+  * spf.py: Removed, because it was really old, and this is a Perl package, not
+    a Python one.
+  * Did I mention lots of minor code and documentation fixes/improvements?
+
+ -- Julian Mehnle <julian@mehnle.net>  Thu, 31 Dec 2005 23:00:00 +0000
+
+libmail-spf-query-perl (1.997-3) unstable; urgency=low
+
+  * Preserve $@ when testing for presence of Sys::Hostname::Long.
+    This should clean up SpamAssassin logs.  (Closes: #332952)
+  * After 'spfquery -v' prints version, exit with zero status.
+    (Closes: #237751)
+  * Install 'sample' directory as documentation.  (Closes: #245367)
+  * Increase Standards-Version to 3.6.2
+
+ -- Chip Salzenberg <chip@debian.org>  Mon, 10 Oct 2005 15:05:03 -0700
+
+libmail-spf-query-perl (1.997-2) unstable; urgency=low
+
+  * Include man page for spfquery, contributed by Zac Sprackett
+    <zac@sprackett.com>.  (Closes: #264112)
+  * Fix typo in package description.  (Closes: #252160)
+  * Depend on a newer version of libnet-dns-perl.  (Closes: #238247)
+  
+ -- Chip Salzenberg <chip@debian.org>  Sun, 10 Apr 2005 13:21:40 -0400
+
+libmail-spf-query-perl (1.997-1) unstable; urgency=low
+
+  * New upstream release.
+
+ -- Chip Salzenberg <chip@debian.org>  Tue,  8 Mar 2005 12:25:13 -0500
+
+libmail-spf-query-perl (1.996-1) unstable; urgency=low
+
+  * New upstream release.
+  * Include upstream's experimental new version of spfquery.
+    (At least now we have error checking on command options.)
+
+ -- Chip Salzenberg <chip@debian.org>  Thu, 11 Mar 2004 14:37:28 -0500
+
+libmail-spf-query-perl (1.991-1) unstable; urgency=low
+
+  * Initial Release.
+
+ -- Chip Salzenberg <chip@debian.org>  Wed,  4 Feb 2004 11:20:21 -0500
+

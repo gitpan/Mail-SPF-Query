@@ -21,11 +21,11 @@
 #
 # Licensed under GPL
 #
-# see: http://spf.pobox.com/
-#      http://www.anarres.org/projects/srs/srs.pdf
+# see: http://www.openspf.org
+#      http://www.libsrs2.org/srs/srs.pdf
 #
 # availability: bundled with Mail::SPF::Query on CPAN
-#               or at http://spf.pobox.com/downloads.html
+#               or at http://www.openspf.org/downloads.html
 #
 # this version is compatible with SPF draft 02.9.7.
 #
@@ -33,7 +33,7 @@
 # INSTALLATION:
 # =============
 #
-# Basic INSTALL doc at http://spf.pobox.com/sendmail-milter-INSTALL.txt
+# Basic INSTALL doc at http://www.openspf.org/sendmail-milter-INSTALL.txt
 #
 # Adiitional install notes by Alain Knaff:
 #
@@ -371,9 +371,9 @@ sub envrcpt_callback : locked {
         #
         # Also, be sure to visit:
         #
-        #    http://www.anarres.org/projects/srs/
-        #    http://spf.pobox.com/srs.html
-        #    http://asarian-host.net/srs/sendmailsrs.htm
+        #    http://www.libsrs2.org
+        #    http://www.openspf.org/srs.html
+        #    http://srs-socketmap.info/sendmailsrs.htm
         #
         # The -S option is for people with a specific, deliberate
         # purpose in mind. Do not haphazardly enable this just

@@ -5,7 +5,7 @@
 
 spf-milter is a Milter, which works with Sendmail 8.12 and up, and provides
 an SPF-compliant extension to the SMTP communication between your MTA and
-connecting clients. See http://spf.pobox.com/ for details about SPF itself.
+connecting clients. See http://www.openspf.org for details about SPF itself.
 
 spf-milter is written entirely in Perl, and uses the native threaded Milter
 model. spf-milter is licensed under GPL.
@@ -133,7 +133,7 @@ Perform two basic tests:
    with permission).
 
 If properly rejected, you will get a 550 response, and a text with a
-reference to "http://spf.pobox.com/why.html? ..." in the line.
+reference to "http://www.openspf.org/why.html? ..." in the line.
 
 N.B. The actual return-text may vary from MTA to MTA, but the 550 response
 code SHOULD always be the same (an extended SMTP code, '550', '5.7.1').

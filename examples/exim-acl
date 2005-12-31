@@ -23,7 +23,7 @@
 #    .include /usr/local/exim/spf.acl
 #
 # 3. Grab a copy of Mail::SPF::Query from
-#    http://spf.pobox.com/downloads.html and install it
+#    http://www.openspf.org/downloads.html and install it
 #
 # 4. Run spfd -path=/tmp/spfd as the same user as Exim runs
 #
@@ -66,8 +66,8 @@ spf_check:
 
     warn     set acl_m9  = ${readsocket{/tmp/spfd}\
                            {ip=$sender_host_address\n\
-			   helo=${if def:sender_helo_name\
-			   {$sender_helo_name}{NOHELO}}\
+                           helo=${if def:sender_helo_name\
+                           {$sender_helo_name}{NOHELO}}\
                            \nsender=$acl_m8\n\n}{20s}{\n}{socket failure}} 
 
     # Defer on socket error

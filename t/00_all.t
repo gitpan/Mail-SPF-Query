@@ -1,6 +1,5 @@
-
 # Before `make install' is performed this script should be runnable with
-# `make test'. After `make install' it should work as `perl test.pl'
+# `make test'.  After `make install' it should work as `perl t/00all.t'.
 
 #########################
 
@@ -15,13 +14,12 @@ getopts('d:',\%opts);
 my @test_table;
 
 BEGIN {
-
-  open TESTFILE, "test.txt";
+  open TESTFILE, "t/test.dat";
   @test_table = grep { /\S/ and not /^\s*#/ } <TESTFILE>;
   chomp @test_table;
   close TESTFILE;
 
-  plan tests => 1+ @test_table ;
+  plan tests => 1 + map(/\G,?(\d+)/g, @test_table);
 };
 
 use Mail::SPF::Query;
@@ -38,7 +36,8 @@ my $testnum = 2;
 #########################
 
 foreach my $tuple (@test_table) {
-  my ($num, $domain, $ipv4, $expected_result, $expected_smtp_comment, $expected_header_comment) = $tuple =~ /\t/ ? split(/\t/, $tuple) : split(' ', $tuple);
+  my ($num, $domain, $ipv4, $expected_result, $expected_smtp_comment, $expected_header_comment) =
+    ($tuple =~ /\t/ ? split(/\t/, $tuple) : split(' ', $tuple));
 
   my ($actual_result, $actual_smtp_comment, $actual_header_comment);
 
@@ -139,3 +138,4 @@ foreach my $tuple (@test_table) {
   }
 }
 
+# vim:syn=perl
