@@ -1,20 +1,71 @@
 # Legend:
 # --- = A new release
-#   x = Changed something significant, or removed a feature
-#   * = Fixed a bug, or made a minor improvement
 #   + = Added a feature (in a backwards compatible way)
+#   ! = Changed something significant, or removed a feature
+#   * = Fixed a bug, or made a minor improvement
+
+--- 1.999 (2006-02-07 00:00)
+
+  Mail::SPF::Query:
+  ! No longer accept malformed SPF records such as "\"v=spf1 ...\"" (spurious
+    double quotes) or " v=spf1 ..." (leading whitespace).
+  * Combine multiple TXT strings into a single string _before_ fallbacks are
+    tried.  Thus, fallbacks now also get applied if there are only non-
+    "v=spf1" TXT records; this wasn't the case before.
+  * Guard against non-numeric cidr-lengths (closes rt.cpan.org bug #17061).
+  * Flattened the { 'domain' => { record => '...' } } override and fallback
+    argument format to just { 'domain' => '...' }.  The old format is still
+    supported for backwards compatibility.
+  * Added a "BUGS" section to the man-page documenting M:S:Q's known
+    deficiencies.
+  * Lots of minor code improvements.
+
+  spfquery:
+  * Correctly recognize the --mail-from (AKA --sender) option.  The version
+    in the M:S:Q 1.998 release was broken in this regard.
+  * Actually require the --helo option for the --mail-from (AKA --sender)
+    form.
+  * Cleaned up command-line argument validation code.
+  * Cleaned up the inconsistent short and long (--help) usage and man-page
+    texts.
+  * Clarified the file input syntax in the help and man-page texts.
+  + The "--override" and "--fallback" options are now actually working and
+    documented.
+
+  Tests:
+  * Overhauled 00_all.t test script:
+    * Don't skip tests when a non-last test in a test tuple fails (this made
+      test 223 "fail", for example, because Test::Harness thought that some
+      planned tests were not performed).
+    * Marked test 219 (SERVFAIL) as non-critical, because it isn't completely
+      reliable (sometimes, apparently behind some NATs and firewalls, the
+      query just times out instead of returning SERVFAIL) (closes rt.cpan.org
+      bug #17099).
+    * Generate and collect debug log output (internally) along with the normal
+      M:S:Q->result() calls right away, so that extra just-to-get-debug-output
+      M:S:Q->result() calls can be saved.  Also we can make debug log output
+      Test::Harness-compatible this way by printing it ourselves with '#'
+      chars at the beginnings of lines.
+    * Cleaned up code.
+  * Cleaned up comments in t/test.dat test data file.
+
+  Debian:
+  ! Build-Depend, not Build-Depend-Indep, on debhelper.  Also, depend on
+    debhelper >= 5.
+  * Build-Depend-Indep on netbase to allow testing to work when building in a
+    pbuilder chroot (closes Debian bug #351030).
 
 --- 1.998 (2005-12-31 23:00)
 
   Mail::SPF::Query:
-  x Require Perl 5.6 or better.
-  x Require URI::Escape module, not URI module.
-  x Removed obsolete Caller-ID support (closes Debian bugs #337319, #337500).
-  x Always use Sys::Hostname::Long. And thus, require Sys::Hostname::Long to be
+  ! Require Perl 5.6 or better.
+  ! Require URI::Escape module, not URI module.
+  ! Removed obsolete Caller-ID support (closes Debian bugs #337319, #337500).
+  ! Always use Sys::Hostname::Long. And thus, require Sys::Hostname::Long to be
     installed (closes Debian bugs #332952, #342629).
   * Changed local machine hostname macro from "xr" to "r" (closes rt.cpan.org
     bug #9744).
-  x Restrict the number of SPF record lookups to a maximum of 10 (was: 20).
+  ! Restrict the number of SPF record lookups to a maximum of 10 (was: 20).
     Thanks to Craig Whitmore!
   * Fixes to mechanisms implementation:
     * a, mx: Check if domain is a valid FQDN, i.e. ends in ".<toplabel>".
@@ -27,7 +78,7 @@
   spfd:
   + Added complete POD documentation/man-page.
   * Both "--xxx" and "-xxx" forms of command-line options are now supported.
-  x Renamed most of the command-line options:
+  ! Renamed most of the command-line options:
       --path       => --socket
       --pathuser   => --socket-user
       --pathgroup  => --socket-group
@@ -47,7 +98,7 @@
     #237751, has been already resolved in Debian release 1.997-3).
   * Both "--xxx" and "-xxx" forms of command-line options are now supported.
     Also, a "-x" (short) form is now supported for the most important options.
-  x Renamed the "--max-lookup" option to "--max-lookup-count" to match the
+  ! Renamed the "--max-lookup" option to "--max-lookup-count" to match the
     Mail::SPF::Query API.  "--max-lookup" is still supported for backwards
     compatibility.
   * Added "--mail-from" and "-m" synonyms for the "--sender" option for
@@ -67,12 +118,12 @@
     package!
 
   Miscellaneous:
-  x Updated URLs everywhere:
+  ! Updated URLs everywhere:
       http://spf.pobox.com                            -> http://www.openspf.org
       http://www.anarres.org/projects/srs/            -> http://www.libsrs2.org
       http://asarian-host.net/srs/sendmailsrs.htm
                                    -> http://srs-socketmap.info/sendmailsrs.htm
-  x Point out everywhere the "non-standard"-ness of best guess processing,
+  ! Point out everywhere the "non-standard"-ness of best guess processing,
     trusted forwarder accreditation checking, and several other features.
   * Cleaned up source package file and directory layout:
       Query.pm     -> lib/Mail/SPF/Query.pm
@@ -86,7 +137,7 @@
       (error/TempError) the message.
     * Verbose mode is disabled by default.
     Thanks to Arjen de Korte!
-  x spf.py: Removed, because it was really old, and this is a Perl package, not
+  ! spf.py: Removed, because it was really old, and this is a Perl package, not
     a Python one.
   * Did I mention lots of minor code and documentation fixes/improvements?
 
@@ -165,5 +216,5 @@
 
   * First public release.
 
-# $Id: CHANGES 127 2005-12-31 22:55:10Z julian $
+# $Id: CHANGES 141 2006-02-07 00:04:51Z julian $
 # vim:tw=79 syn=changelog

@@ -1,10 +1,17 @@
 #!/usr/bin/perl
 
+#
 # spfd: Simple forking daemon to provide SPF query services
-# 2005-12-27 16:17 UTC
+# 
 # (C) 2003-2004 Meng Weng Wong <mengwong+spf@pobox.com>
-# Improved argument parsing added by Julian Mehnle <julian@mehnle.net>
-# If you're reading source code, you should probably be on spf-devel@v2.listbox.com.
+#     2005-2006 Julian Mehnle <julian@mehnle.net>
+# 
+# If you're reading source code, you should probably be on
+# spf-devel@v2.listbox.com.
+#
+# $Id: spfd 141 2006-02-07 00:04:51Z julian $
+#
+##############################################################################
 
 =head1 NAME
 
@@ -12,7 +19,7 @@ spfd - simple forking daemon to provide SPF query services
 
 =head1 VERSION
 
-2005-12-27
+2006-02-07
 
 =head1 SYNOPSIS
 

@@ -4,9 +4,10 @@
 #
 #  Author: Wayne Schlitt <wayne@midwestcs.com>
 #
-#  File:   spfquery.c
+#  File:   spfquery
 #  Desc:   SPF command line utility
 #
+# $Id: spfquery 138 2006-01-22 18:00:34Z julian $
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of either:
@@ -51,15 +52,14 @@ domain
 
 =head1 VERSION
 
-2.2
+2.3
 
 =head1 SYNOPSIS
 
 B<spfquery> B<--mail-from>|B<-m>|B<--sender>|B<-s> I<email-address>|I<domain>
-B<--ip>|B<-i> I<ip-address> [B<--rcpt-to>|B<-r> I<email-address>] [I<OPTIONS>]
+B<--helo>|B<-h> I<hostname> B<--ip>|B<-i> I<ip-address> [I<OPTIONS>]
 
-B<spfquery> B<--helo>|B<-h> I<hostname> B<--ip>|B<-i> I<ip-address>
-[B<--rcpt-to>|B<-r> I<email-address>] [I<OPTIONS>]
+B<spfquery> B<--helo>|B<-h> I<hostname> B<--ip>|B<-i> I<ip-address> [I<OPTIONS>]
 
 B<spfquery> B<--file>|B<-f> I<filename>|B<-> [I<OPTIONS>]
 
@@ -74,13 +74,14 @@ on the command-line arguments or data given in a file or on standard input.
 For information on SPF see L<http://www.openspf.org>.
 
 The B<--mail-from> form checks if the given I<ip-address> is an authorized SMTP
-sender for the given envelope sender I<domain> or I<email-address> (so-called
-C<MAIL FROM> check).
+sender for the given envelope sender I<domain> or I<email-address> and C<HELO>
+I<hostname> (so-called C<MAIL FROM> check).  If a I<domain> is given,
+C<postmaster> will be substituted for the localpart.
 
 The B<--helo> form checks if the given I<ip-address> is an authorized SMTP
 sender for the given C<HELO> I<hostname> (so-called C<HELO> check).
 
-The B<--file> form reads (I<ip-address>, I<sender-address>, I<helo-hostname>)
+The B<--file> form reads "I<ip-address> I<sender-address> I<helo-hostname>"
 tuples from the file with the specified I<filename>, or from standard input if
 I<filename> is B<->.
 
@@ -98,6 +99,23 @@ following additional I<OPTIONS>:
 
 Print out debug information.
 
+=item B<--default-explanation> I<string>
+
+Use the specified I<string> as the default explanation if the SPF record does
+not specify an explanation string itself.
+
+=item B<--guess> I<spf-terms>
+
+Use I<spf-terms> as a default record if no SPF record is found.  B<This is a
+non-standard feature.>
+
+=item B<--keep-comments>
+
+=item B<--no-keep-comments>
+
+Do (not) print any comments found when reading from a file or from standard
+input.
+
 =item B<--local> I<spf-terms>
 
 Process I<spf-terms> as local policy before resorting to a default result
@@ -105,26 +123,28 @@ Process I<spf-terms> as local policy before resorting to a default result
 record).  For example, this could be used for white-listing one's secondary
 MXes: C<mx:mydomain.example.org>.
 
-=item B<--trusted>
-
-=item B<--no-trusted>
-
-Do (not) perform C<trusted-forwarder.org> accreditation checking.  Disabled by
-default.  B<This is a non-standard feature.>
-
-=item B<--guess> I<spf-terms>
-
-Use I<spf-terms> as a default record if no SPF record is found.  B<This is a
-non-standard feature.>
-
-=item B<--default-explanation> I<string>
-
-Use the specified I<string> as the default explanation if the SPF record does
-not specify an explanation string itself.
-
 =item B<--max-lookup-count> I<n>
 
 Perform a maximum of I<n> SPF record lookups.  Defaults to B<10>.
+
+=item B<--name> I<hostname>
+
+Use I<hostname> as the hostname of the local system instead of auto-detecting
+it.
+
+=item B<--override> I<domain>B<=>I<spf-record>
+
+=item B<--fallback> I<domain>B<=>I<spf-record>
+
+Set overrides and fallbacks.  Each option can be specified multiple times.  For
+example: C<--override example.org='v=spf1 -all' --override
+'*.example.net'='v=spf1 a mx -all' --fallback example.com='v=spf1 -all'>.
+B<This is a non-standard feature.>
+
+=item B<--rcpt-to> I<email-addresses>
+
+Automatically allow the secondary MXes of the comma-separated list of
+I<email-addresses>.
 
 =item B<--sanitize>
 
@@ -134,23 +154,12 @@ Do (not) sanitize the output by condensing consecutive white-space into a
 single space and replacing non-printable characters with question marks.
 Enabled by default.
 
-=item B<--name> I<hostname>
+=item B<--trusted>
 
-Use I<hostname> as the hostname of the local system instead of auto-detecting
-it.
+=item B<--no-trusted>
 
-=item B<--override> I<...>
-
-=item B<--fallback> I<...>
-
-Set overrides and fallbacks.  See L<Mail::SPF::Query>.
-
-=item B<--keep-comments>
-
-=item B<--no-keep-comments>
-
-Do (not) print any comments found when reading from a file or from standard
-input.
+Do (not) perform C<trusted-forwarder.org> accreditation checking.  Disabled by
+default.  B<This is a non-standard feature.>
 
 =back
 
@@ -245,7 +254,7 @@ man-page written by S. Zachariah Sprackett for an older version of B<spfquery>.
 
 =cut
 
-our $VERSION = "2.2";
+our $VERSION = '2.3';
 
 use warnings;
 use strict;
@@ -257,10 +266,13 @@ sub usage()
 {
   printf STDERR <<'EOT';
 Usage:
+    spfquery --mail-from|-m <email-address>|<domain> --helo|-h <hostname>
+        --ip|-i <ip-address> [OPTIONS]
+    spfquery --helo|-h <hostname> --ip|-i <ip-address> [OPTIONS]
+    spfquery --file|-f <filename>|- [OPTIONS]
+    spfquery --version|-V
 
-spfquery [control options | data options]
-
-Use the --help option for more information
+See `spfquery --help` for more information.
 EOT
 }
 
@@ -268,44 +280,48 @@ sub help()
 {
   print STDERR <<'EOT';
 Usage:
-    spfquery [ control options | data options ]
+    spfquery --mail-from|-m <email-address>|<domain> --helo|-h <hostname>
+        --ip|-i <ip-address> [OPTIONS]
+    spfquery --helo|-h <hostname> --ip|-i <ip-address> [OPTIONS]
+    spfquery --file|-f <filename>|- [OPTIONS]
+    spfquery --version|-V
 
-Valid data options are:
-    --mail-from <sender-address>
-                        The email address used as the envelope sender address
-                        (SMTP MAIL FROM command).  If no local part is given,
-                        'postmaster' will be assumed.
-    --helo <hostname>   The domain name given as the envelope sender hostname
-                        (SMTP HELO command).
-    --file <filename>   Read parameters from a file.  Use '-' to read from
-                        stdin.
+spfquery performs SPF checks based on the command-line arguments or data given
+in a file or on standard input.
 
-    --ip <ip-address>   The IP address that is sending email.
+The "--mail-from" form checks if the given <ip-address> is an authorized SMTP
+sender for the given envelope sender <domain> or <email-address> and HELO
+<hostname> (so-called MAIL FROM check).  If a <domain> is given, "postmaster"
+will be substituted for the localpart.
+
+The "--helo" form checks if the given <ip-address> is an authorized SMTP sender
+for the given HELO <hostname> (so-called HELO check).
+
+The "--file" form reads "<ip-address> <sender-address> <helo-hostname>" tuples
+from the file with the specified <filename>, or from standard input if
+<filename> is "-".
+
+The "--version" form prints version information of spfquery.
+
+Valid OPTIONS are:
+    --debug             Output debugging information.
+    --default-explanation <string>
+                        Default explanation string to use.
+    --guess <spf-terms> Default checks if no SPF record is found.
+    --keep-comments     Print comments found when reading from a file.
+    --local <spf-terms> Local policy for whitelisting.
+    --max-lookup-count <n>
+                        Maximum number of DNS lookups to allow.
+    --name <hostname>   The name of the system doing the SPF checking.
+    --override <domain>=<spf-record>
+    --fallback <domain>=<spf-record>
+                        Set override and fallback SPF records for domains.
     --rcpt-to <email-addresses>
                         A comma-separated lists of email addresses that will
                         have email from their secondary MXes automatically
                         allowed.
-
-Any one of --sender, --helo, or --file is required.  The --rcpt-to option is
-optional.  The --file option conflicts with all the other data options
- 
-Valid control options are:
-    --debug             Output debugging information.
-    --local <spf-terms> Local policy for whitelisting.
-    --trusted           Check trusted-forwarder.org white-list.
-    --guess <spf-terms> Default checks if no SPF record is found.
-    --default-explanation <string>
-                        Default explanation string to use.
-    --max-lookup-count <n>
-                        Maximum number of DNS lookups to allow.
     --no-sanitize       Do not clean up invalid characters in output.
-    --name <hostname>   The name of the system doing the SPF checking.
-    --fallback <...>    Fallback SPF records for domains.
-    --override <...>    Override SPF records for domains.
-    --keep-comments     Print comments found when reading from a file.
-
-    --version           Print version of spfquery.
-    --help              Print out these options.
+    --trusted           Check trusted-forwarder.org white-list.
 
 Examples:
     spfquery -i 11.22.33.44 -m user@example.com -h spammer.example.net
@@ -333,23 +349,21 @@ my $result = GetOptions(
   'max-lookup-count|max-lookup=i',
   'sanitize!',
   'name=s',
-  'fallback=s',
-  'override=s',
+  'override=s%',
+  'fallback=s%',
   'keep-comments!',
   
   'version|V!',
   'help!'
 );
 
-$opt{name} = 'spfquery' if not defined($opt{name});
-
-if ($opt{help}) {
-  help();
+if (!$result) {
+  usage();
   exit 255;
 }
 
-if (!$result) {
-  usage();
+if ($opt{help}) {
+  help();
   exit 255;
 }
 
@@ -358,73 +372,69 @@ if ($opt{version}) {
   exit 0;
 }
 
+$opt{name} = 'spfquery' if not defined($opt{name});
+
 #
-# process the SPF request
+# Process the SPF request
 #
+
 my $res;
 
-if (!defined($opt{ip}) || (!defined($opt{sender}) && !defined($opt{helo}))) {
-  if (!defined($opt{file}) ||
-      defined($opt{ip}) || defined($opt{sender}) || defined($opt{helo})) {
-    usage();
-    exit 255;
-  }
-
-  #
-  # the requests are on STDIN
-  #
-        
+if (
+  defined($opt{'mail-from'}) and defined($opt{helo}) and defined($opt{ip}) and
+  not defined($opt{file})
+) {
+  # --mail-from form:
+  $res = do_query();
+}
+elsif (
+  defined($opt{helo}) and defined($opt{ip}) and
+  not defined($opt{'mail-from'}) and not defined($opt{file})
+) {
+  # --helo form:
+  $res = do_query();
+}
+elsif (
+  defined($opt{file}) and
+  not defined($opt{'mail-from'}) and not defined($opt{helo}) and not defined($opt{ip})
+) {
+  # --file form:
   local *FIN;
-
-  if ( $opt{file} eq "-" ) {
+  if ($opt{file} eq '-') {
     *FIN = \*STDIN;
   }
   else {
-    open( FIN, $opt{file} ) || die "Could not open: %s\n", $opt{file};
+    open(FIN, $opt{file}) || die("Could not open: $opt{file}\n");
   }
-        
-  while ( <FIN> ) {
+  while (<FIN>) {
     chomp;
-
     if ( /^\s*$/ || /^\s*#/ ) {
-      if ( $opt{'keep-comments'} ) {
-        printf "%s\n", $_;
-      }
-
+      print("$_\n") if $opt{'keep-comments'};
       next;
     }
     s/^\s*//;
-
-    ($opt{ip}, $opt{sender}, $opt{helo}, $opt{'rcpt-to'}) = split;
-
+    @opt{'ip', 'mail-from', 'helo', 'rcpt-to'} = split;
     $res = do_query();
   }
 }
 else {
-  if (defined($opt{file})) {
-    usage();
-    exit 255;
-  }
-
-  $res = do_query();
+  # Invalid usage.
+  usage();
+  exit 255;
 }
 
 exit $res;
 
 
-
+#
+# Process the SPF request and print the results
+#
 sub do_query {
-
-
-  #
-  # Process the SPF request and print the results
-  #
-
-  $opt{sender} = '' if not defined($opt{sender});
-  $opt{helo}   = '' if not defined($opt{helo});
+  $opt{'mail-from'} = '' if not defined($opt{'mail-from'});
+  $opt{helo}        = '' if not defined($opt{helo});
 
   my $query = new Mail::SPF::Query (ipv4       => $opt{ip},
-                                    sender     => $opt{sender},
+                                    sender     => $opt{'mail-from'},
                                     helo       => $opt{helo},
                                     local      => $opt{local},
                                     trusted    => $opt{trusted},
@@ -468,7 +478,7 @@ sub do_query {
         
   my $received_spf;
   $received_spf = "Received-SPF: $per_result ($header_comment) client-ip=$opt{ip};";
-  $received_spf .= " envelope-from=$opt{sender};" if defined($opt{sender});
+  $received_spf .= " envelope-from=$opt{'mail-from'};" if defined($opt{'mail-from'});
   $received_spf .= " helo=$opt{helo};" if defined($opt{helo});
   { no warnings 'uninitialized';
     print "$result\n$smtp_comment\n$header_comment\n$received_spf\n";

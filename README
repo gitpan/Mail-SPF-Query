@@ -1,4 +1,4 @@
-Mail::SPF::Query 1.998
+Mail::SPF::Query 1.999
 ======================
 
 The SPF protocol relies on sender domains to publish a DNS whitelist of their

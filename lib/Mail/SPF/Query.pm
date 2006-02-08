@@ -11,32 +11,7 @@ package Mail::SPF::Query;
 # Contributions by various members of the SPF project <http://www.openspf.org>
 # License: like Perl, i.e. GPL-2 and Artistic License
 #
-# $Id: Query.pm 127 2005-12-31 22:55:10Z julian $
-# 
-# This version is compatible with spf-draft-20040209.
-#
-# The result of evaluating a SPF record associated with a domain is one of:
-# 
-#   pass      Explicit pass -- message is not a forgery.
-#   fail      Explicit fail -- MTA may reject, MUA may discard.
-#   softfail  Explicit softfail -- please apply strict antispam checks.
-#   neutral   Domain explicitly wishes you to pretend it had no SPF record.
-#   none      The domain does not have an SPF record.
-#   error     Some type of temporary failure, usually DNS-related.
-#   unknown   A permanent error, such as missing SPF record during "include"
-#             or "redirect", parse error, unknown mechanism, or record loop.
-#
-# TODO:
-#   * Add ipv6 support.
-#   * Add support for doing HELO tests before MAIL FROM tests.
-#   * If the spf_source is not 'original-spf-record' (but e.g. a local policy
-#     source), do not return the "why.html" default explanation, because
-#     "why.html" will not be able to reproduce the local policy.
-#   * If there are multiple unrecognized mechanisms, they all need to be
-#     preserved in the 'unknown' Received-SPF header.  Right now only the
-#     first appears.
-#   * Override and fallback keys need to be lc()ed at start.
-# 
+# $Id: Query.pm 141 2006-02-07 00:04:51Z julian $
 # ----------------------------------------------------------
 
 use 5.006;
@@ -45,7 +20,7 @@ use strict;
 use warnings;
 no warnings 'uninitialized';
 
-our $VERSION = '1.998';
+our $VERSION = '1.999';
 $VERSION = eval($VERSION);
 
 use Sys::Hostname::Long;
@@ -82,7 +57,7 @@ Mail::SPF::Query - query Sender Policy Framework for an IP,email,helo
 
 =head1 VERSION
 
-1.998
+1.999
 
 =head1 SYNOPSIS
 
@@ -127,16 +102,50 @@ command:
 
     perl -MMail::SPF::Query -le 'print for Mail::SPF::Query->new(helo=>shift, ipv4=>shift, sender=>shift)->result' helohost.example.com 1.2.3.4 user@example.com
 
-=head1 NON-STANDARD FEATURES
+=head1 BUGS
 
 Mail::SPF::Query tries to implement the SPF specification (see L</"SEE ALSO">)
 as close as reasonably possible given that M:S:Q has been the very first SPF
-implementation and has changed with the SPF specification over time.
+implementation and has changed with the SPF specification over time.  As a
+result, M:S:Q has various known deficiencies that cannot be corrected with
+reasonably little effort:
 
-As such, M:S:Q does have some legacy features that are not parts of the
-official SPF specification, most notably I<best guess processing> and I<trusted
-forwarder accreditation checking>.  Please be careful when using these
-I<non-standard> features or when reproducing them in your own SPF
+=over
+
+=item *
+
+B<Unable to query HELO and MAIL FROM separately.>  M:S:Q is not designed to
+support the I<separate> querying of the HELO and MAIL FROM identities.  Passing
+the HELO identity as the C<sender> argument for a stand-alone HELO check might
+generally work but could yield unexpected results.
+
+=item *
+
+B<No IPv6 support.>  IPv6 is not supported.  C<ip6> mechanisms in SPF records
+and everywhere else are simply ignored.
+
+=item *
+
+B<Result explanation may be inappropriate for local policy results.>  If a
+query result was caused by anything other than a real SPF record (i.e. local
+policy, overrides, fallbacks, etc.), and no custom C<default_explanation> was
+specified, the domain's explanation or M:S:Q's hard-coded default explanation
+will still be returned.  Be aware that in this case the explanation may not
+correctly explain the reason for such an artificial result.
+
+=for comment
+INTERNAL NOTE:  If the spf_source is not 'original-spf-record' (but e.g. a
+local policy source), do not return the "why.html" default explanation, because
+"why.html" will not be able to reproduce the local policy.
+
+=back
+
+=head1 NON-STANDARD FEATURES
+
+Also due to its long history, M:S:Q does have some legacy features that are not
+parts of the official SPF specification, most notably I<best guess processing>
+and I<trusted forwarder accreditation checking>.  Please be careful when using
+these I<non-standard> features or when reproducing them in your own SPF
 implementation, as they may cause unexpected results.
 
 =head1 METHODS
@@ -156,11 +165,11 @@ implementation, as they may cause unexpected results.
         default_explanation => 'Please see http://spf.my.isp/spferror.html for details',
         max_lookup_count    => 10,       # total number of SPF include/redirect queries
         sanitize            => 0,        # do not sanitize all returned strings
-        myhostname => "foo.example.com", # prepended to header_comment
-        fallback => {   "foo.com" => { record => "v=spf1 a mx -all", OPTION => VALUE },
-                      "*.foo.com" => { record => "v=spf1 a mx -all", OPTION => VAULE }, },
-        override => {   "bar.com" => { record => "v=spf1 a mx -all", OPTION => VALUE },
-                      "*.bar.com" => { record => "v=spf1 a mx -all", OPTION => VAULE }, }
+        myhostname => 'foo.example.com', # prepended to header_comment
+        override => {   'example.net' => 'v=spf1 a mx -all',
+                      '*.example.net' => 'v=spf1 a mx -all' },
+        fallback => {   'example.org' => 'v=spf1 a mx -all',
+                      '*.example.org' => 'v=spf1 a mx -all' }
     ) };
 
     if ($@) { warn "bad input to Mail::SPF::Query: $@" }
@@ -196,28 +205,32 @@ and return a single string which contains the sanitized result.
 
 Set C<debug=E<gt>1> to watch the queries happen.
 
-Set C<fallback> to define "pretend" SPF records for domains that don't publish
-them yet.  Wildcards are supported.  B<This is a non-standard feature.>
-
 Set C<override> to define SPF records for domains that do publish but which you
 want to override anyway.  Wildcards are supported.  B<This is a non-standard
 feature.>
 
-Note: domain name arguments to fallback and override need to be in all
+Set C<fallback> to define "pretend" SPF records for domains that don't publish
+them yet.  Wildcards are supported.  B<This is a non-standard feature.>
+
+Note: domain name arguments to override and fallback need to be in all
 lowercase.
 
 =cut
 
 # ----------------------------------------------------------
-sub new {
+#                            new
 # ----------------------------------------------------------
+
+sub new {
   my $class = shift;
   my $query = bless { @_ }, $class;
 
   $query->{lookup_count} = 0;
 
-  $query->{ipv4} = delete $query->{ip}   if $query->{ip}   and $query->{ip} =~ $looks_like_ipv4;
-  $query->{helo} = delete $query->{ehlo} if $query->{ehlo};
+  $query->{ipv4} = delete $query->{ip}
+    if defined($query->{ip}) and $query->{ip} =~ $looks_like_ipv4;
+  $query->{helo} = delete $query->{ehlo}
+    if defined($query->{ehlo});
 
   $query->{local} .= ' ' . $TRUSTED_FORWARDER if ($query->{trusted});
 
@@ -283,8 +296,18 @@ sub new {
   if (not $query->{myhostname}) {
     $query->{myhostname} = Sys::Hostname::Long::hostname_long();
   }
-
   $query->{myhostname} ||= "localhost";
+
+  # Unfold legacy { 'domain' => { record => '...' } } override and fallback
+  # structures to just { 'domain' => '...' }:
+  foreach ('override', 'fallback') {
+    if (ref(my $domains_hash = $query->{$_}) eq 'HASH') {
+      foreach my $domain (keys(%$domains_hash)) {
+        $domains_hash->{$domain} = $domains_hash->{$domain}->{record}
+          if ref($domains_hash->{$domain}) eq 'HASH';
+      }
+    }
+  }
 
   $query->post_new(@_) if $class->can("post_new");
 
@@ -1467,7 +1490,10 @@ sub mech_ip4 {
 
   my ($network, $cidr_length) = split (/\//, $cidr_spec, 2);
 
-  if ($network !~ /^\d+\.\d+\.\d+\.\d+$/) { return ("unknown" => "bad argument to ip4: $cidr_spec"); }
+  if (
+    $network !~ /^\d+\.\d+\.\d+\.\d+$/ ||
+    (defined($cidr_length) && $cidr_length !~ /^\d+$/)
+  ) { return ("unknown" => "bad argument to ip4: $cidr_spec"); }
   
   $cidr_length = "32" if not defined $cidr_length;
 
@@ -1569,9 +1595,9 @@ sub find_ancestor {
 
     for my $match ($ancestor_level > 0 ? "*.$ancestor" : $ancestor) {
       $query->debuglog("  DirectiveSet $which_hash: is $match in the $which_hash hash?");
-      if (my $found = $query->{$which_hash}->{lc $match}) {
+      if (my $record = $query->{$which_hash}->{lc $match}) {
         $query->debuglog("  DirectiveSet $which_hash: yes, it is.");
-        return wantarray ? ($which_hash, $match, $found) : $found;
+        return wantarray ? ($which_hash, $match, $record) : $record;
       }
     }
   }
@@ -1580,13 +1606,12 @@ sub find_ancestor {
 
 sub found_record_for {
   my $query = shift;
-  my ($which_hash, $matched_domain_glob, $found) = $query->find_ancestor(@_);
-  return if not $found;
-  my $txt = $found->{record};
-  $query->{spf_source} = "explicit $which_hash found: $matched_domain_glob defines $txt";
+  my ($which_hash, $matched_domain_glob, $record) = $query->find_ancestor(@_);
+  return if not $record;
+  $query->{spf_source} = "explicit $which_hash found: $matched_domain_glob defines $record";
   $query->{spf_source_type} = "full-explanation";
-  $txt = "v=spf1 $txt" if $txt !~ /^v=spf1\b/i;
-  return $txt;
+  $record = "v=spf1 $record" if $record !~ /^v=spf1\b/i;
+  return $record;
 }
 
 sub try_override {
@@ -1616,58 +1641,46 @@ sub try_fallback {
 
     my $txt;
 
-    # overrides can come from two places:
-    #  1 - when operating in best_guess mode, spfquery may be called with a ($guess_mechs) argument, which comes in as $override_text.
-    #  2 - when operating with ->new(..., override => { ... }) we need to load the override dynamically.
-
-    if (not $override_text
-        and
-        exists $query->{override}
-       ) {
-      $txt = $query->try_override($current_domain);
-    }
-
+    # Overrides can come from two places:
+    # - When operating in best_guess mode, spfquery may be called with a $guess_mechs argument, which comes in as $override_text.
+    # - When operating with ->new(..., override => { ... }) we need to load the override dynamically.
     if ($override_text) {
       $txt = "v=spf1 $override_text ?all";
       $query->{spf_source} = "local policy";
       $query->{spf_source_type} = "full-explanation";
     }
-    else {
-      my @txt;
+    elsif (exists $query->{override}) {
+      $txt = $query->try_override($current_domain);
+    }
 
+    # Retrieve a record from DNS:
+    if (!defined $txt) {
+      my @txt;
       $query->debuglog("  DirectiveSet->new(): doing TXT query on $current_domain");
       @txt = $query->myquery($current_domain, "TXT", "char_str_list");
       $query->debuglog("  DirectiveSet->new(): TXT query on $current_domain returned error=$query->{error}, last_dns_error=$query->{last_dns_error}");
 
-      if ($query->{error} || $query->{last_dns_error} eq 'NXDOMAIN' || ! @txt) {
-        # try the fallbacks.
-        $query->debuglog("  DirectiveSet->new(): will try fallbacks.");
-        if (exists $query->{fallback}
-            and
-            my $found_txt = $query->try_fallback($current_domain, "fallback")) {
-          @txt = $found_txt;
-        }
-        else {
-          $query->debuglog("  DirectiveSet->new(): fallback search failed.");
-        }
-      }
-
       # Combine multiple TXT strings into a single string:
       foreach (@txt) {
-        s/^"(.*)"$/$1/;
-        s/^\s+//;
-        s/\s+$//;
-        
-        if (/^v=spf1(\s.*|)$/i) {
-          $txt .= $1;
-        }
+        $txt .= $1 if /^v=spf1\s*(.*)$/;
       }
 
-      if (!defined $txt && $default_record) {
-          $txt = "v=spf1 $default_record ?all";
-          $query->{spf_source} = "local policy";
-          $query->{spf_source_type} = "full-explanation";
-      }
+      $txt = undef
+        if $query->{error} or $query->{last_dns_error} eq 'NXDOMAIN';
+    }
+
+    # Try the fallbacks:
+    if (!defined $txt and exists $query->{fallback}) {
+      $query->debuglog("  DirectiveSet->new(): will try fallbacks.");
+      $txt = $query->try_fallback($current_domain, "fallback");
+      defined($txt)
+        or $query->debuglog("  DirectiveSet->new(): fallback search failed.");
+    }
+
+    if (!defined $txt and defined $default_record) {
+      $txt = "v=spf1 $default_record ?all";
+      $query->{spf_source} = "local policy";
+      $query->{spf_source_type} = "full-explanation";
     }
 
     $query->debuglog("  DirectiveSet->new(): SPF policy: $txt");
@@ -1675,7 +1688,7 @@ sub try_fallback {
     return if not defined $txt;
 
     # TODO: the prepending of the v=spf1 is a massive hack; get it right by saving the actual raw orig_txt.
-    my $directive_set = bless { orig_txt => ($txt =~ /^v=spf1/ ? $txt : "v=spf1$txt"), txt => $txt } , $class;
+    my $directive_set = bless { orig_txt => ($txt =~ /^v=spf1/ ? $txt : "v=spf1 $txt"), txt => $txt } , $class;
 
     TXT_RESPONSE:
     for ($txt) {

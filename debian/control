@@ -1,7 +1,8 @@
 Source: libmail-spf-query-perl
 Section: perl
 Priority: optional
-Build-Depends-Indep: debhelper (>= 4.0.2), perl (>= 5.8.0-7), libsys-hostname-long-perl, libnet-dns-perl (>= 0.46), libnet-cidr-lite-perl (>= 0.15), liburi-perl
+Build-Depends-Indep: perl (>= 5.8.0-7), netbase, libsys-hostname-long-perl, libnet-dns-perl (>= 0.46), libnet-cidr-lite-perl (>= 0.15), liburi-perl
+Build-Depends: debhelper (>= 5)
 Maintainer: Julian Mehnle <julian@mehnle.net>
 Standards-Version: 3.6.2
 
