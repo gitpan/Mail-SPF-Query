@@ -11,7 +11,7 @@ package Mail::SPF::Query;
 # Contributions by various members of the SPF project <http://www.openspf.org>
 # License: like Perl, i.e. GPL-2 and Artistic License
 #
-# $Id: Query.pm 141 2006-02-07 00:04:51Z julian $
+# $Id: Query.pm 143 2006-02-26 17:41:10Z julian $
 # ----------------------------------------------------------
 
 use 5.006;
@@ -20,8 +20,8 @@ use strict;
 use warnings;
 no warnings 'uninitialized';
 
-our $VERSION = '1.999';
-$VERSION = eval($VERSION);
+our $VERSION = '1.999.1';  # fake version for EU::MM and CPAN
+$VERSION = '1.999001';     # real numerical version
 
 use Sys::Hostname::Long;
 use Net::DNS qw();  # by default it exports mx, which we define.
@@ -57,7 +57,7 @@ Mail::SPF::Query - query Sender Policy Framework for an IP,email,helo
 
 =head1 VERSION
 
-1.999
+1.999.1
 
 =head1 SYNOPSIS
 
@@ -100,7 +100,9 @@ the first style.
 You can try out Mail::SPF::Query on the command line with the following
 command:
 
-    perl -MMail::SPF::Query -le 'print for Mail::SPF::Query->new(helo=>shift, ipv4=>shift, sender=>shift)->result' helohost.example.com 1.2.3.4 user@example.com
+    perl -MMail::SPF::Query -le 'print for Mail::SPF::Query->new(
+        helo => shift, ipv4 => shift, sender => shift)->result' \
+        helohost.example.com 1.2.3.4 user@example.com
 
 =head1 BUGS
 
@@ -153,23 +155,23 @@ implementation, as they may cause unexpected results.
 =head2 C<< Mail::SPF::Query->new() >>
 
     my $query = eval { new Mail::SPF::Query (
-        ip      => '127.0.0.1',
-        sender  => 'foo@example.com',
-        helo    => 'host.example.com',
+        ip          => '127.0.0.1',
+        sender      => 'foo@example.com',
+        helo        => 'host.example.com',
 
-    # optional parameters:
-        debug   => 1, debuglog => sub { print STDERR "@_\n" },
-        local   => 'extra mechanisms',
-        trusted => 1,                    # do trusted forwarder processing
-        guess   => 1,                    # do best_guess if no SPF record
+        # Optional parameters:
+        debug       => 1, debuglog => sub { print STDERR "@_\n" },
+        local       => 'extra mechanisms',
+        trusted     => 1,                   # do trusted forwarder processing
+        guess       => 1,                   # do best guess if no SPF record
         default_explanation => 'Please see http://spf.my.isp/spferror.html for details',
-        max_lookup_count    => 10,       # total number of SPF include/redirect queries
-        sanitize            => 0,        # do not sanitize all returned strings
-        myhostname => 'foo.example.com', # prepended to header_comment
-        override => {   'example.net' => 'v=spf1 a mx -all',
-                      '*.example.net' => 'v=spf1 a mx -all' },
-        fallback => {   'example.org' => 'v=spf1 a mx -all',
-                      '*.example.org' => 'v=spf1 a mx -all' }
+        max_lookup_count    => 10,          # total number of SPF includes/redirects
+        sanitize    => 0,                   # do not sanitize all returned strings
+        myhostname  => 'foo.example.com',   # prepended to header_comment
+        override    => {   'example.net' => 'v=spf1 a mx -all',
+                         '*.example.net' => 'v=spf1 a mx -all' },
+        fallback    => {   'example.org' => 'v=spf1 a mx -all',
+                         '*.example.org' => 'v=spf1 a mx -all' }
     ) };
 
     if ($@) { warn "bad input to Mail::SPF::Query: $@" }
@@ -1135,10 +1137,10 @@ sub macro_substitute {
 
     my $original = $arg;
 
-#      macro-char   = ( '%{' alpha *digit [ 'r' ] *delim '}' )
-#                     / '%%'
-#                     / '%_'
-#                     / '%-'
+    # macro-char   = ( '%{' alpha *digit [ 'r' ] *delim '}' )
+    #                / '%%'
+    #                / '%_'
+    #                / '%-'
 
     $arg =~ s/%([%_-]|{(\w[^}]*)})/$query->macro_substitute_item($1)/ge;
 
@@ -1348,7 +1350,7 @@ sub mech_a {
   my $domain_to_use = $argument || $query->{domain};
 
   # see code below in ip4 for more validation
-  if ($domain_to_use !~ / \. \p{IsAlpha} (?: [\p{IsAlnum}-]* \p{IsAlnum} ) $ /x) {
+  if ($domain_to_use !~ / \. [a-z] (?: [a-z0-9-]* [a-z0-9] ) $ /ix) {
     return ("unknown" => "bad argument to a: $domain_to_use not a valid FQDN");
   }
 
@@ -1383,7 +1385,7 @@ sub mech_mx {
 
   my $domain_to_use = $argument || $query->{domain};
 
-  if ($domain_to_use !~ / \. \p{IsAlpha} (?: [\p{IsAlnum}-]* \p{IsAlnum} ) $ /x) {
+  if ($domain_to_use !~ / \. [a-z] (?: [a-z0-9-]* [a-z0-9] ) $ /ix) {
     return ("unknown" => "bad argument to mx: $domain_to_use not a valid FQDN");
   }
 
@@ -1796,9 +1798,8 @@ permit mail from secondary MXes.
 
 =head1 AUTHORS
 
-Meng Weng Wong <mengwong+spf@pobox.com>
-
-Philip Gladstone
+Meng Weng Wong <mengwong+spf@pobox.com>, Philip Gladstone, Julian Mehnle
+<julian@mehnle.net>
 
 =head1 SEE ALSO
 

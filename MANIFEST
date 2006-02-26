@@ -6,6 +6,7 @@ debian/compat
 debian/control
 debian/copyright
 debian/rules
+debian/watch
 examples/exim-acl
 examples/postfix-policyd-spf
 examples/README

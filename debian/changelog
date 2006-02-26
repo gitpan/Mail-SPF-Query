@@ -1,3 +1,17 @@
+libmail-spf-query-perl (1.999.1) unstable; urgency=low
+
+  Debian:
+  * Added watch file.
+
+  Mail::SPF::Query:
+  * Do not use \p{} named properties in the "a" and "mx" mechanisms' argument
+    validation code, since Perl 5.6 requires (flaky) "use utf8" for them to
+    work, and [a-z]/[a-z0-9] should work just as well (closes rt.cpan.org bug
+    #17815).
+  * Some minor documentation formatting improvements.
+
+ -- Julian Mehnle <julian@mehnle.net>  Sun, 26 Feb 2006 18:00:00 +0000
+
 libmail-spf-query-perl (1.999) unstable; urgency=low
 
   Debian:

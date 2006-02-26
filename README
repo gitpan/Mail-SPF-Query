@@ -1,5 +1,5 @@
-Mail::SPF::Query 1.999
-======================
+Mail::SPF::Query 1.999.1
+========================
 
 The SPF protocol relies on sender domains to publish a DNS whitelist of their
 designated outbound mailers.  Given an envelope sender, Mail::SPF::Query
